@@ -80,6 +80,32 @@ func readAll(t *testing.T, files []string) counts {
 	return c
 }
 
+// recordOrder returns the record types across all files in order, so a test can
+// assert where a gap record sits relative to the messages around it.
+func recordOrder(t *testing.T, files []string) []string {
+	t.Helper()
+	var order []string
+	for _, p := range files {
+		r, err := tapefile.Open(p)
+		if err != nil {
+			t.Fatalf("open %s: %v", p, err)
+		}
+		for {
+			typ, _, err := r.Next()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				r.Close()
+				t.Fatalf("read %s: %v", p, err)
+			}
+			order = append(order, typ.String())
+		}
+		r.Close()
+	}
+	return order
+}
+
 func runCapture(t *testing.T, s *feed.Synthetic, cfg Config) (Summary, counts) {
 	t.Helper()
 	if cfg.Root == "" {
@@ -221,8 +247,9 @@ func TestUndecodableFramesAreStillWritten(t *testing.T) {
 		t.Fatal(err)
 	}
 	sum := Summary{}
+	s := &sink{w: w, seq: newSeqTracker(feed.SeqContiguous), log: quietLogger(), sum: &sum}
 	fr := feed.Frame{Kind: feed.KindData, Raw: []byte(`{"type":`), Recv: time.Now().UTC()}
-	if err := handle(w, fr, &sum, quietLogger()); err != nil {
+	if err := s.handle(fr); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if err := w.Close(); err != nil {

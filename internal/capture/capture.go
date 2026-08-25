@@ -73,6 +73,15 @@ type Summary struct {
 	Rotations int
 	Reseeds   int64
 
+	// Gaps counts sequence anomalies written into the stream as gap records.
+	// A non-zero count means part of this session is untrustworthy: the public
+	// feed offers no backfill, so the gap record is the correction.
+	Gaps int64
+
+	// StaleMessages counts messages the exchange re-sent from before a fresh
+	// snapshot. Expected after a reseed, and not gaps. They are still stored.
+	StaleMessages int64
+
 	// DecodeErrors counts frames that would not parse. They are still written:
 	// an unparseable frame is data we cannot afford to discard.
 	DecodeErrors int64
@@ -111,6 +120,8 @@ func (s Summary) LogAttrs() []any {
 		"files", len(s.Files),
 		"rotations", s.Rotations,
 		"reseeds", s.Reseeds,
+		"gaps", s.Gaps,
+		"stale_messages", s.StaleMessages,
 		"decode_errors", s.DecodeErrors,
 		"exchange_errors", s.ExchangeErrors,
 		"max_queue_depth", s.MaxQueueDepth,
@@ -135,6 +146,7 @@ func Run(ctx context.Context, f feed.Feed, cfg Config) (Summary, error) {
 		Product: f.Product(),
 		Started: time.Now().UTC(),
 	}
+	sink := &sink{w: w, seq: newSeqTracker(f.SeqMode()), log: log, sum: &sum}
 
 	// If the writer stops first, the reader must be told, or it will block
 	// forever on a send nobody is receiving.
@@ -165,7 +177,7 @@ drain:
 			if d := len(frames) + 1; d > sum.MaxQueueDepth {
 				sum.MaxQueueDepth = d
 			}
-			if err := handle(w, fr, &sum, log); err != nil {
+			if err := sink.handle(fr); err != nil {
 				writeErr = err
 				break drain
 			}
@@ -205,51 +217,98 @@ drain:
 // readerStopTimeout bounds how long shutdown waits for the reader goroutine.
 const readerStopTimeout = 10 * time.Second
 
+// sink turns frames into records. It owns the writer, the sequence tracker and
+// the counters, so that every path from a frame to disk goes through one place.
+type sink struct {
+	w   *tapefile.Writer
+	seq *seqTracker
+	log *slog.Logger
+	sum *Summary
+}
+
 // handle writes one frame and updates counters.
-func handle(w *tapefile.Writer, fr feed.Frame, sum *Summary, log *slog.Logger) error {
-	before := w.Path()
+func (s *sink) handle(fr feed.Frame) error {
+	before := s.w.Path()
 	defer func() {
-		if after := w.Path(); before != "" && after != before {
-			log.Info("rotated", "closed", before, "open", after)
+		if after := s.w.Path(); before != "" && after != before {
+			s.log.Info("rotated", "closed", before, "open", after)
 		}
 	}()
 
 	switch fr.Kind {
 	case feed.KindReseed:
-		sum.Reseeds++
-		log.Info("reseed", "reason", fr.Reason)
-		return w.WriteReseed(tapefile.Reseed{At: fr.Recv, Reason: fr.Reason})
+		s.sum.Reseeds++
+		s.log.Info("reseed", "reason", fr.Reason)
+		// Record where the fresh subscription landed before anything from it
+		// is written, so a replayer sees the boundary in the right place.
+		s.seq.reseed()
+		return s.w.WriteReseed(tapefile.Reseed{At: fr.Recv, Reason: fr.Reason})
 
 	case feed.KindData:
-		sum.Messages++
+		s.sum.Messages++
 
 		e, err := event.Decode(fr.Raw, fr.Recv)
 		if err != nil {
 			// Write it anyway. A frame we cannot parse is still evidence, and
 			// discarding it would be the silent kind of data loss.
-			sum.DecodeErrors++
-			log.Warn("undecodable frame", "err", err, "bytes", len(fr.Raw))
-		} else if e.IsError() {
-			sum.ExchangeErrors++
-			log.Error("exchange error frame", "detail", event.ErrorText(fr.Raw))
+			s.sum.DecodeErrors++
+			s.log.Warn("undecodable frame", "err", err, "bytes", len(fr.Raw))
+		} else {
+			if e.IsError() {
+				s.sum.ExchangeErrors++
+				s.log.Error("exchange error frame", "detail", event.ErrorText(fr.Raw))
+			}
+			if e.HasSequence {
+				if err := s.checkSequence(e, fr.Recv); err != nil {
+					return err
+				}
+			}
 		}
 
-		if err := w.WriteMessage(tapefile.Message{Recv: fr.Recv, Raw: fr.Raw}); err != nil {
+		if err := s.w.WriteMessage(tapefile.Message{Recv: fr.Recv, Raw: fr.Raw}); err != nil {
 			return err
 		}
-		if sum.Messages%progressEvery == 0 {
-			st := w.Stats()
-			log.Info("progress",
-				"messages", sum.Messages,
+		if s.sum.Messages%progressEvery == 0 {
+			st := s.w.Stats()
+			s.log.Info("progress",
+				"messages", s.sum.Messages,
 				"records", st.Records,
 				"bytes", st.Bytes,
-				"file", w.Path())
+				"gaps", s.sum.Gaps,
+				"file", s.w.Path())
 		}
 		return nil
 
 	default:
 		return fmt.Errorf("capture: unknown frame kind %d", fr.Kind)
 	}
+}
+
+// checkSequence records a gap record ahead of the message that revealed it, so
+// the tape reads as "here is where continuity broke, and here is what resumed".
+// A gap is written into the stream and not merely logged: the public feed
+// offers no backfill, so the record is the only thing that can tell a later
+// reader this window is untrustworthy.
+func (s *sink) checkSequence(e event.Event, at time.Time) error {
+	a, stale := s.seq.observe(e.Product, e.Sequence)
+	if stale {
+		s.sum.StaleMessages++
+		s.log.Debug("stale message after reseed",
+			"product", e.Product, "sequence", e.Sequence)
+		return nil
+	}
+	if a.Kind == AnomalyNone {
+		return nil
+	}
+
+	s.sum.Gaps++
+	s.log.Warn("sequence gap",
+		"kind", a.Kind.String(),
+		"product", e.Product,
+		"expected", a.Expected,
+		"got", a.Got,
+		"missing", int64(a.Got)-int64(a.Expected))
+	return s.w.WriteGap(tapefile.Gap{At: at, Expected: a.Expected, Got: a.Got})
 }
 
 // progressEvery is how often the running count is logged. A constant rather
