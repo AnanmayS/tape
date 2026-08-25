@@ -452,8 +452,12 @@ messages a second. Comparing throughput across rows of that table would be
 comparing three different experiments.
 
 **The fair comparison pins the offered rate.** Each policy is given the same
-load, twice what the writer can take, so the only thing that varies is what it
-does with the excess:
+load — the window replayed at a multiple of its own wall clock, paced to about
+100,200 msg/s against the columnar writer and 484,700 against the raw one, twice
+what each can take — so the only thing that varies is what a policy does with
+the excess. Block's offered column reads lower than the pacing asked for because
+blocking is precisely what throttles the reader: the load was offered and
+refused, which is the policy working.
 
 | format | policy | offered/s | written/s | dropped | loss | peak queue | heap |
 |---|---|---|---|---|---|---|---|
@@ -484,7 +488,9 @@ that stops draining its socket eventually has the exchange disconnect it, and
 that is a path this project has handled since M2: reconnect, reseed record, gap
 record, window marked untrustworthy. Nothing new has to be built and nothing can
 be lost silently. **Block is the default, and `tape capture` has no policy
-flag.**
+flag.** The other two stay in the tree, selectable from `tape bench` and nowhere
+else, because a decision whose measurement cannot be re-run is an opinion with a
+number attached.
 
 **Every drop is a gap record.** A drop policy that merely counted what it threw
 away would produce a window missing messages that reads as complete, which is
@@ -499,7 +505,7 @@ accounting under all three policies: every frame a session accepted is on disk
 or inside a gap record's count.
 
 **The queue's approach to the edge,** replaying the same window at multiples of
-its own wall clock under the block policy — peak queue depth of 4,096:
+its own wall clock under the block policy — peak queue depth, out of 4,096:
 
 | offered msg/s | raw | columnar |
 |---|---|---|
