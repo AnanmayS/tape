@@ -141,7 +141,9 @@ type Stats struct {
 	Gaps     int64
 	Reseeds  int64
 
-	// Bytes is the stored size of the records read, record headers included.
+	// Bytes is the stored size of the records read: payloads plus the per-record
+	// type and length prefix. It excludes each file's 8-byte header, so it is
+	// the capture writer's byte count less 8 per file.
 	Bytes int64
 
 	// FirstTime and LastTime bound the window on the local receive clock. Their

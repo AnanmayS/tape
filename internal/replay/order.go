@@ -1,6 +1,9 @@
 package replay
 
-import "strings"
+import (
+	"cmp"
+	"strings"
+)
 
 // orderKey is the total ordering key for one stored record. Every field in it
 // comes from bytes on disk or from a record's position in the file list, so two
@@ -30,50 +33,28 @@ type orderKey struct {
 
 // compareKeys returns -1, 0 or 1. Zero is only possible for a key compared with
 // itself: the arrival index is unique within a window.
+//
+// Every field is compared, never subtracted. Subtracting two int64 timestamps
+// and taking the sign is the usual way to write this and it is wrong: two
+// timestamps far enough apart overflow, and the overflowed difference has the
+// wrong sign, which would silently invert the order of the two records.
 func compareKeys(a, b orderKey) int {
-	switch {
-	case a.exchange != b.exchange:
-		return sign64(a.exchange - b.exchange)
-	case a.seqRank != b.seqRank:
-		return signInt(int(a.seqRank) - int(b.seqRank))
-	case a.sequence != b.sequence:
-		if a.sequence < b.sequence {
-			return -1
-		}
-		return 1
-	case a.channel != b.channel:
-		return strings.Compare(a.channel, b.channel)
-	case a.file != b.file:
-		return signInt(a.file - b.file)
-	case a.record != b.record:
-		return sign64(a.record - b.record)
-	default:
-		return 0
+	if c := cmp.Compare(a.exchange, b.exchange); c != 0 {
+		return c
 	}
-}
-
-// sign64 avoids the overflow that a bare subtraction of two int64 timestamps
-// can produce.
-func sign64(d int64) int {
-	switch {
-	case d < 0:
-		return -1
-	case d > 0:
-		return 1
-	default:
-		return 0
+	if c := cmp.Compare(a.seqRank, b.seqRank); c != 0 {
+		return c
 	}
-}
-
-func signInt(d int) int {
-	switch {
-	case d < 0:
-		return -1
-	case d > 0:
-		return 1
-	default:
-		return 0
+	if c := cmp.Compare(a.sequence, b.sequence); c != 0 {
+		return c
 	}
+	if c := strings.Compare(a.channel, b.channel); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(a.file, b.file); c != 0 {
+		return c
+	}
+	return cmp.Compare(a.record, b.record)
 }
 
 // content copies only the ordering content of a key, leaving the arrival index
