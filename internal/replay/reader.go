@@ -2,10 +2,13 @@ package replay
 
 import (
 	"container/heap"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"time"
+
+	"github.com/AnanmayS/tape/internal/storage"
 )
 
 // DefaultReorderWindow is how many records the reorder buffer holds.
@@ -188,18 +191,39 @@ type Reader struct {
 	stats Stats
 }
 
-// Open opens a window for replay. root is a directory of tape files or a single
-// tape file. Close the Reader when done.
+// Open opens a window held on local disk. root is a directory of tape files or
+// a single tape file. Close the Reader when done.
 func Open(root string, opts ...Option) (*Reader, error) {
-	cfg := config{reorder: DefaultReorderWindow}
-	for _, o := range opts {
-		o(&cfg)
-	}
 	src, err := newSource(root)
 	if err != nil {
 		return nil, err
 	}
-	return &Reader{src: src, cfg: cfg, buf: make(pendingHeap, 0, cfg.reorder+1)}, nil
+	return newReader(src, opts), nil
+}
+
+// OpenStore opens the window held under prefix in st — a bucket, a directory,
+// anything satisfying storage.Store. Objects are streamed as they are read, not
+// downloaded first: a day of BTC-USD does not fit anywhere a replay should
+// insist on putting it.
+//
+// The output is identical to Open's for the same window. Files are named
+// relative to prefix, and every other field of the canonical form comes from
+// bytes in the objects, so where a window was stored is not something a
+// replay of it can reveal.
+func OpenStore(ctx context.Context, st storage.Store, prefix string, opts ...Option) (*Reader, error) {
+	src, err := newStoreSource(ctx, st, prefix)
+	if err != nil {
+		return nil, err
+	}
+	return newReader(src, opts), nil
+}
+
+func newReader(src *source, opts []Option) *Reader {
+	cfg := config{reorder: DefaultReorderWindow}
+	for _, o := range opts {
+		o(&cfg)
+	}
+	return &Reader{src: src, cfg: cfg, buf: make(pendingHeap, 0, cfg.reorder+1)}
 }
 
 // Files returns the window's files, relative to its root, in read order.
@@ -207,7 +231,8 @@ func (r *Reader) Files() []string {
 	return append([]string(nil), r.src.files...)
 }
 
-// Root returns the window root the files are relative to.
+// Root names the window the files are relative to: a local directory, or a
+// store and prefix.
 func (r *Reader) Root() string { return r.src.root }
 
 // Stats returns what has been delivered so far.

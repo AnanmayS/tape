@@ -2,14 +2,18 @@ package replay
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"hash"
 	"io"
 	"math/rand/v2"
+	"path"
 	"sort"
 	"testing"
+
+	"github.com/AnanmayS/tape/internal/storage"
 )
 
 // goldenDigest is the SHA-256 of the canonical NDJSON of testdata/window,
@@ -55,6 +59,127 @@ func TestDeterminism(t *testing.T) {
 	}
 }
 
+// TestDeterminismThroughStore is the M4 claim: moving storage behind an
+// interface changed nothing about what comes out.
+//
+// The same fixture is replayed twice — once by local path, once through a
+// storage.Store — and both must produce the golden digest. The store is the
+// filesystem one here, which is the implementation CI runs and the one that
+// needs no credentials; the S3 implementation is held to the same digest
+// against an in-process fake in internal/storage/s3store.
+func TestDeterminismThroughStore(t *testing.T) {
+	root := fixtureWindow(t)
+	direct, directDigest := replayCanonical(t, root)
+	stored, storedDigest := replayCanonicalStore(t, storage.NewLocal(root), "")
+
+	if storedDigest != directDigest {
+		t.Fatalf("replay through a store differs from replay by path:\n path  %s\n store %s",
+			directDigest, storedDigest)
+	}
+	if !bytes.Equal(direct, stored) {
+		t.Fatalf("digests match but bytes differ: %d vs %d bytes", len(direct), len(stored))
+	}
+	if storedDigest != goldenDigest {
+		t.Errorf("window digest through a store is %s, want %s", storedDigest, goldenDigest)
+	}
+	t.Logf("replayed %d bytes through %s, sha256 %s", len(stored), storage.NewLocal(root), storedDigest)
+}
+
+// TestStoreWindowPrefix checks that a window living under a key prefix replays
+// the same as one living at the root of a store. Files are named relative to
+// the window, so the prefix a window happens to be filed under is not
+// something its replay can reveal — which is what lets a bucket holding every
+// symbol and every day still replay one window byte-identically.
+func TestStoreWindowPrefix(t *testing.T) {
+	root := fixtureWindow(t)
+	flat, flatDigest := replayCanonicalStore(t, storage.NewLocal(root), "")
+
+	// Re-file the same objects under a deep prefix, alongside a decoy window
+	// that the prefix scan must not pick up.
+	deep := t.TempDir()
+	st := storage.NewLocal(deep)
+	const prefix = "v1/symbol=BTC-USD/date=2026-08-25/hour=03/"
+	ctx := context.Background()
+	for _, rel := range mustList(t, storage.NewLocal(root), "") {
+		copyObject(t, storage.NewLocal(root), rel, st, prefix+path.Base(rel))
+	}
+	if err := st.Put(ctx, "v1/symbol=ETH-USD/date=2026-08-25/hour=03/decoy.tape",
+		bytes.NewReader([]byte("not this window"))); err != nil {
+		t.Fatalf("Put decoy: %v", err)
+	}
+
+	prefixed, prefixedDigest := replayCanonicalStore(t, st, prefix)
+	if prefixedDigest == flatDigest {
+		t.Fatal("the two layouts nest the files at different depths, so the file names " +
+			"in the output must differ; identical digests mean the names are not in the output")
+	}
+
+	// What must be identical is everything except the file names: strip those
+	// and the two windows are the same bytes.
+	if a, b := withoutFileNames(flat), withoutFileNames(prefixed); !bytes.Equal(a, b) {
+		t.Fatalf("a window under a prefix replayed differently: %d vs %d bytes", len(a), len(b))
+	}
+	if _, again := replayCanonicalStore(t, st, prefix); again != prefixedDigest {
+		t.Errorf("two replays under a prefix disagree: %s vs %s", prefixedDigest, again)
+	}
+	t.Logf("window under %q replays to sha256 %s", prefix, prefixedDigest)
+}
+
+// withoutFileNames blanks the "file" field of every canonical record, leaving
+// the part of the output that must not depend on where a window is stored.
+func withoutFileNames(ndjson []byte) []byte {
+	var out bytes.Buffer
+	for _, line := range bytes.Split(ndjson, []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		i := bytes.Index(line, []byte(`"file":"`))
+		if i < 0 {
+			out.Write(line)
+			out.WriteByte('\n')
+			continue
+		}
+		j := bytes.IndexByte(line[i+len(`"file":"`):], '"')
+		out.Write(line[:i])
+		out.Write(line[i+len(`"file":"`)+j:])
+		out.WriteByte('\n')
+	}
+	return out.Bytes()
+}
+
+func mustList(t *testing.T, st storage.Store, prefix string) []string {
+	t.Helper()
+	keys, err := st.List(context.Background(), prefix)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	return keys
+}
+
+func copyObject(t *testing.T, from storage.Store, fromKey string, to storage.Store, toKey string) {
+	t.Helper()
+	ctx := context.Background()
+	rc, err := from.Open(ctx, fromKey)
+	if err != nil {
+		t.Fatalf("Open %s: %v", fromKey, err)
+	}
+	defer rc.Close()
+	if err := to.Put(ctx, toKey, rc); err != nil {
+		t.Fatalf("Put %s: %v", toKey, err)
+	}
+}
+
+// replayCanonicalStore is replayCanonical through a storage.Store.
+func replayCanonicalStore(t *testing.T, st storage.Store, prefix string) ([]byte, string) {
+	t.Helper()
+	r, err := OpenStore(context.Background(), st, prefix, WithContinueOnGap())
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer r.Close()
+	return drainCanonical(t, r)
+}
+
 // TestDeterminismAcrossCodePaths replays the same window a second way: every
 // record is read out, shuffled, and sorted with an unstable sort on the same
 // comparator. The two paths share the comparator and nothing else — one is an
@@ -89,7 +214,13 @@ func replayCanonical(t *testing.T, root string) ([]byte, string) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer r.Close()
+	return drainCanonical(t, r)
+}
 
+// drainCanonical serializes a whole replay and returns the bytes and their
+// digest.
+func drainCanonical(t *testing.T, r *Reader) ([]byte, string) {
+	t.Helper()
 	var buf bytes.Buffer
 	enc := NewCanonicalEncoder(&buf)
 	for {

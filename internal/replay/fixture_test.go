@@ -16,6 +16,7 @@ import (
 
 	"github.com/AnanmayS/tape/internal/capture"
 	"github.com/AnanmayS/tape/internal/feed"
+	"github.com/AnanmayS/tape/internal/storage"
 	"github.com/AnanmayS/tape/internal/tapefile"
 )
 
@@ -32,6 +33,15 @@ import (
 // Storing them compressed is what makes "a few thousand real events" and "small
 // enough to commit" both true. Nothing about the replay changes: the test reads
 // the same bytes capture wrote.
+//
+// The fixture keeps the directory names it was captured under, which are no
+// longer the ones capture writes: M4 moved local files onto the storage key
+// layout. That is deliberate. Replay names files relative to the window root
+// and knows nothing about the partitioning above it, so the fixture is a
+// perfectly good window either way — and leaving the names alone is what lets
+// goldenDigest carry across the storage move unchanged, which is the whole
+// evidence that the move changed nothing. Regenerating the fixture would refile
+// it under the new layout and move the digest; that is a decision, not a fix.
 //
 // The level2 snapshot frame is the one thing left out. A single BTC-USD
 // snapshot is 1.1 MB, larger than the rest of the fixture put together, and it
@@ -223,13 +233,14 @@ func gzipTo(src, dst string) (int64, error) {
 // keeping the raw bytes and receive times exactly as stored. Snapshot frames
 // are skipped; see the note at the top of this file.
 func realFrames(root string, n int) ([]feed.Frame, error) {
-	windowRoot, files, err := windowFiles(root)
+	store := storage.NewLocal(root)
+	files, err := windowFiles(context.Background(), store, "")
 	if err != nil {
 		return nil, err
 	}
 	var out []feed.Frame
 	for _, rel := range files {
-		rd, err := tapefile.Open(filepath.Join(windowRoot, filepath.FromSlash(rel)))
+		rd, err := tapefile.Open(filepath.Join(root, filepath.FromSlash(rel)))
 		if err != nil {
 			return nil, err
 		}
