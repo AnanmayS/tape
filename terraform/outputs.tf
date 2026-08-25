@@ -1,3 +1,8 @@
+output "aws_region" {
+  description = "Region the stack was applied to. Every AWS CLI call in docs/deploy.md needs it."
+  value       = var.aws_region
+}
+
 output "bucket_name" {
   description = "Capture bucket. This is the -s3-bucket argument for `tape verify` and `tape replay`."
   value       = aws_s3_bucket.captures.id
