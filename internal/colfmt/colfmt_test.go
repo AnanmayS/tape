@@ -530,18 +530,7 @@ func TestFootersAreScannable(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer f.Close()
-	if _, err := f.Seek(tapefile.HeaderSize, io.SeekStart); err != nil {
-		t.Fatalf("seek: %v", err)
-	}
-	footers, err := Scan(f)
-	if err != nil {
-		t.Fatalf("Scan: %v", err)
-	}
+	footers := scanFooters(t, path)
 	if len(footers) != 2 {
 		t.Fatalf("scanned %d batches, want 2 (%d rows at %d per batch)",
 			len(footers), DefaultMaxRows+52, DefaultMaxRows)
@@ -565,6 +554,93 @@ func TestFootersAreScannable(t *testing.T) {
 	if got := time.Unix(0, footers[len(footers)-1].MaxRecv).UTC(); !got.Equal(last) {
 		t.Errorf("last batch ends at %s, want %s", got, last)
 	}
+}
+
+// TestBatchesAreBoundedByRecordsNotTheClock is the policy the live capture
+// argued for. A batch closes on the records in it — how many, how large, how
+// far apart their timestamps are — and on nothing else, so the same frames
+// always produce the same file, and a durability flush cannot cut a batch down
+// to a size not worth compressing.
+func TestBatchesAreBoundedByRecordsNotTheClock(t *testing.T) {
+	// Flushing after every record must not split a single batch.
+	flushed := batchesFor(t, 20, time.Second, true)
+	unflushed := batchesFor(t, 20, time.Second, false)
+	if len(flushed) != len(unflushed) {
+		t.Fatalf("flushing changed the batching: %d batches with, %d without",
+			len(flushed), len(unflushed))
+	}
+	if len(flushed) != 1 {
+		t.Fatalf("20 records one second apart made %d batches, want 1", len(flushed))
+	}
+
+	// Records far enough apart close a batch on age, so a slow feed still
+	// reaches disk.
+	spread := batchesFor(t, 40, DefaultMaxAge/4, false)
+	if len(spread) < 8 {
+		t.Fatalf("40 records %s apart made %d batches, want one per %s of feed",
+			DefaultMaxAge/4, len(spread), DefaultMaxAge)
+	}
+	for _, f := range spread {
+		if span := time.Duration(f.MaxRecv - f.MinRecv); span > DefaultMaxAge {
+			t.Errorf("a batch spans %s, longer than the %s bound", span, DefaultMaxAge)
+		}
+	}
+}
+
+// batchesFor captures n records at the given spacing and returns the footers of
+// the batches they landed in.
+func batchesFor(t *testing.T, n int, gap time.Duration, flushEvery bool) []Footer {
+	t.Helper()
+	root := t.TempDir()
+	w, err := NewWriter(root, "BTC-USD", time.Hour)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	for i := 0; i < n; i++ {
+		at := base.Add(time.Duration(i) * gap)
+		if err := w.WriteMessage(tapefile.Message{Recv: at, Raw: []byte(matchFrame)}); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if flushEvery {
+			if err := w.Flush(); err != nil {
+				t.Fatalf("Flush: %v", err)
+			}
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	files := w.Stats().Files
+	if len(files) != 1 {
+		t.Fatalf("wrote %d files, want 1", len(files))
+	}
+	footers := scanFooters(t, files[0])
+	var rows uint32
+	for _, ft := range footers {
+		rows += ft.Rows
+	}
+	if rows != uint32(n) {
+		t.Fatalf("wrote %d records, the footers count %d", n, rows)
+	}
+	return footers
+}
+
+// scanFooters reads a file's batch footers, skipping every body.
+func scanFooters(t *testing.T, path string) []Footer {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer f.Close()
+	if _, err := f.Seek(tapefile.HeaderSize, io.SeekStart); err != nil {
+		t.Fatalf("seek: %v", err)
+	}
+	footers, err := Scan(f)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	return footers
 }
 
 // TestVersionByteKeepsTheFormatsApart: neither reader may ever interpret the

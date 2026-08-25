@@ -68,6 +68,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"time"
 )
 
 // Version is the format version this package reads and writes.
@@ -91,6 +92,15 @@ const MaxRows = 1 << 24
 // Batch sizing. Bigger batches compress better and cost more memory to decode,
 // since a batch is decoded whole. 4096 rows of BTC-USD is about 2.7 MB of
 // frames, which is the same order as the replay reorder buffer already holds.
+//
+// All three bounds are properties of the records, never of the clock. A batch
+// closed on wall-clock time would make a capture's bytes depend on when the
+// process happened to tick, and this project's whole claim is that stored bytes
+// are a function of the frames that went into them. It also happens to be the
+// difference between a compression ratio and a bad one: measured on a live
+// BTC-USD capture, closing a batch on the one-second durability flush produced
+// 23-row batches and 4.29x, where the bounds below produce 4.57x — a
+// compression window of twenty-three records is not a compression window.
 const (
 	// DefaultMaxRows is how many records a batch holds before it is flushed.
 	DefaultMaxRows = 4096
@@ -99,6 +109,12 @@ const (
 	// large frames — a level2 snapshot is over a megabyte — does not build a
 	// batch nobody can afford to decode.
 	DefaultMaxBytes = 4 << 20
+
+	// DefaultMaxAge caps a batch by the span of the receive timestamps in it,
+	// so that a slow feed still gets its records onto disk. It is what bounds
+	// how much a hard kill can lose: a clean stop flushes the pending batch,
+	// and only a SIGKILL or an OOM loses it.
+	DefaultMaxAge = 30 * time.Second
 )
 
 // Footer flags.

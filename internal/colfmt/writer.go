@@ -18,29 +18,29 @@ import (
 //
 // The one behavioural difference worth knowing is buffering. A v1 writer hands
 // each record to the file as it arrives; this one holds a batch in memory until
-// it is full, because a column that is written one value at a time is not a
-// column. Flush encodes the pending batch, so the capture loop's flush ticker
-// bounds how long a record can sit unwritten exactly as it does for v1, and a
-// rotation flushes the pending batch into the file it belongs to before that
-// file is closed and handed over.
+// it is full, because a column written one value at a time is not a column.
+//
+// What closes a batch is DefaultMaxRows, DefaultMaxBytes and DefaultMaxAge —
+// all three read off the records themselves, never off the clock. So the bytes
+// a session writes are a function of the frames that went into it, the same way
+// a replay's bytes are, and a batch is big enough to be worth compressing. Flush
+// deliberately does not force a batch; see its comment for what that costs and
+// what it buys. A rotation always does, into the file the records belong to,
+// before that file is closed and handed to the uploader.
 type Writer struct {
 	rot    *tapefile.Rotator
 	window time.Duration
 
-	rows     []row
-	rowBytes int
+	// pending is the batch being built. It is also what decides when a file
+	// rotates, rather than the rotator: nothing reaches the rotator until a
+	// batch is flushed, so by the time it could notice a window boundary the
+	// records that crossed it would already be in the wrong file.
+	pending batch
 
-	// batchAt is the timestamp the pending batch is filed under, and batchWin
-	// is the rotation window that timestamp falls in. The batch is what decides
-	// when a file rotates, not the rotator: nothing reaches the rotator until a
-	// batch is flushed, so by the time it could notice a boundary the records
-	// that crossed it would already be in the wrong file.
-	batchAt  time.Time
+	// batchWin is the rotation window the pending batch belongs to.
 	batchWin time.Time
 
-	maxRows  int
-	maxBytes int
-	records  int64
+	records int64
 }
 
 // NewWriter creates a Writer rooted at root, partitioning by symbol and
@@ -50,12 +50,7 @@ func NewWriter(root, symbol string, window time.Duration, opts ...tapefile.Optio
 	if err != nil {
 		return nil, err
 	}
-	return &Writer{
-		rot:      rot,
-		window:   window,
-		maxRows:  DefaultMaxRows,
-		maxBytes: DefaultMaxBytes,
-	}, nil
+	return &Writer{rot: rot, window: window, pending: newBatch()}, nil
 }
 
 // KeyFor returns the object key of the window covering instant t, relative to
@@ -84,10 +79,11 @@ func (w *Writer) WriteReseed(r tapefile.Reseed) error { return w.add(reseedRow(r
 
 func (w *Writer) add(r row) error {
 	win := r.at.UTC().Truncate(w.window)
-	if len(w.rows) > 0 && !win.Equal(w.batchWin) {
-		// The pending batch belongs to the file that is about to close, so it
-		// goes in first. A batch never spans two windows: a record is filed
-		// under the window its own timestamp names, exactly as in v1.
+
+	// A batch never spans two windows: a record is filed under the window its
+	// own timestamp names, exactly as in v1. The pending batch belongs to the
+	// file that is about to close, so it goes in first.
+	if w.pending.stale(r) || (!w.pending.empty() && !win.Equal(w.batchWin)) {
 		if err := w.flushBatch(); err != nil {
 			return err
 		}
@@ -99,13 +95,12 @@ func (w *Writer) add(r row) error {
 			return err
 		}
 	}
-	if len(w.rows) == 0 {
-		w.batchAt, w.batchWin = r.at, win
+	if w.pending.empty() {
+		w.batchWin = win
 	}
-	w.rows = append(w.rows, r)
-	w.rowBytes += len(r.raw)
+	w.pending.add(r)
 	w.records++
-	if len(w.rows) >= w.maxRows || w.rowBytes >= w.maxBytes {
+	if w.pending.full() {
 		return w.flushBatch()
 	}
 	return nil
@@ -113,28 +108,37 @@ func (w *Writer) add(r row) error {
 
 // flushBatch encodes the pending batch into the file covering its first row.
 func (w *Writer) flushBatch() error {
-	if len(w.rows) == 0 {
+	if w.pending.empty() {
 		return nil
 	}
-	b, err := encodeBatch(w.rows)
+	at := w.pending.rows[0].at
+	b, err := encodeBatch(w.pending.rows)
 	if err != nil {
 		return err
 	}
-	if err := w.rot.Append(w.batchAt, b); err != nil {
+	if err := w.rot.Append(at, b); err != nil {
 		return err
 	}
-	w.rows, w.rowBytes = w.rows[:0], 0
+	w.pending.reset()
 	return nil
 }
 
-// Flush encodes the pending batch and pushes buffered bytes to the file. It
-// does not fsync.
-func (w *Writer) Flush() error {
-	if err := w.flushBatch(); err != nil {
-		return err
-	}
-	return w.rot.Flush()
-}
+// Flush pushes buffered bytes to the file. It does not fsync, and it does not
+// force the pending batch.
+//
+// That is a deliberate difference from the v1 writer, and it is the one place
+// the two formats do not behave alike. Capture calls Flush on a one-second
+// ticker to bound how long a record sits in a buffer; encoding a batch every
+// time it fires would mean a compression window of whatever arrived in a
+// second, which on this feed is twenty-three records and 4.29x instead of
+// 4.57x. It would also make the stored bytes depend on when the ticker fired.
+//
+// The pending batch is instead bounded by the records in it — see the batch
+// sizing constants — and flushed by a rotation and by Close. What a hard kill
+// can lose is therefore that batch: at most DefaultMaxRows records,
+// DefaultMaxBytes of frames, or DefaultMaxAge of feed. A clean stop, which is
+// how SIGINT and an ECS task stop both arrive, loses nothing.
+func (w *Writer) Flush() error { return w.rot.Flush() }
 
 // Path returns the file currently open for writing, or "" if none.
 func (w *Writer) Path() string { return w.rot.Path() }
@@ -168,18 +172,17 @@ func (w *Writer) Close() error {
 // capture: transcoding an existing window from v1, and measuring one. Capture
 // uses Writer.
 type BatchWriter struct {
-	w        io.Writer
-	rows     []row
-	rowBytes int
-	maxRows  int
-	maxBytes int
-	started  bool
+	w       io.Writer
+	pending batch
+	started bool
 }
 
 // NewBatchWriter returns a BatchWriter that writes a whole v2 file to w,
-// starting with the header.
+// starting with the header. It batches under the same three bounds Writer does,
+// so what it produces for a given stream of records is what capture would have
+// produced for the same records.
 func NewBatchWriter(w io.Writer) *BatchWriter {
-	return &BatchWriter{w: w, maxRows: DefaultMaxRows, maxBytes: DefaultMaxBytes}
+	return &BatchWriter{w: w, pending: newBatch()}
 }
 
 // WriteRecord appends one stored record, in the vocabulary tapefile stores it
@@ -189,9 +192,13 @@ func (b *BatchWriter) WriteRecord(t tapefile.RecordType, payload []byte) error {
 	if err != nil {
 		return err
 	}
-	b.rows = append(b.rows, r)
-	b.rowBytes += len(r.raw)
-	if len(b.rows) >= b.maxRows || b.rowBytes >= b.maxBytes {
+	if b.pending.stale(r) {
+		if err := b.Flush(); err != nil {
+			return err
+		}
+	}
+	b.pending.add(r)
+	if b.pending.full() {
 		return b.Flush()
 	}
 	return nil
@@ -206,18 +213,56 @@ func (b *BatchWriter) Flush() error {
 		}
 		b.started = true
 	}
-	if len(b.rows) == 0 {
+	if b.pending.empty() {
 		return nil
 	}
-	enc, err := encodeBatch(b.rows)
+	enc, err := encodeBatch(b.pending.rows)
 	if err != nil {
 		return err
 	}
 	if _, err := b.w.Write(enc); err != nil {
 		return err
 	}
-	b.rows, b.rowBytes = b.rows[:0], 0
+	b.pending.reset()
 	return nil
+}
+
+// batch is the pending rows and the three bounds that close them. One policy,
+// used by both writers: a file's batching is a property of the records in it
+// and not of which writer produced them.
+type batch struct {
+	rows  []row
+	bytes int
+
+	maxRows  int
+	maxBytes int
+	maxAge   time.Duration
+}
+
+func newBatch() batch {
+	return batch{maxRows: DefaultMaxRows, maxBytes: DefaultMaxBytes, maxAge: DefaultMaxAge}
+}
+
+func (b *batch) empty() bool { return len(b.rows) == 0 }
+
+// stale reports whether r is too far past the start of the pending batch to
+// join it. The span is measured between the records' own timestamps, so it is
+// the feed that closes the batch and never the wall clock.
+func (b *batch) stale(r row) bool {
+	return len(b.rows) > 0 && r.at.Sub(b.rows[0].at) >= b.maxAge
+}
+
+func (b *batch) add(r row) {
+	b.rows = append(b.rows, r)
+	b.bytes += len(r.raw)
+}
+
+func (b *batch) full() bool {
+	return len(b.rows) >= b.maxRows || b.bytes >= b.maxBytes
+}
+
+func (b *batch) reset() {
+	b.rows, b.bytes = b.rows[:0], 0
 }
 
 // Close flushes the pending batch. It does not close the underlying writer,
