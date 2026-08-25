@@ -70,8 +70,8 @@ of the file sequence.
 ## Streaming, and how misordering is caught
 
 A caller never holds a window in memory. Files are read in order through a
-bounded reorder buffer holding at most `ReorderWindow` records, 4096 by
-default.
+bounded reorder buffer holding at most 4,096 records by default, or whatever
+`WithReorderWindow` / `-reorder` sets.
 
 Stored order is arrival order; delivered order is exchange order; the two differ
 by however far a message can be displaced, which on Coinbase is one

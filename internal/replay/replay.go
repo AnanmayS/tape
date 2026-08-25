@@ -43,8 +43,10 @@
 // # Ordering is streamed, and failure is loud
 //
 // A caller never has to hold a window in memory. Files are read in sorted order
-// through a bounded reorder buffer: the buffer holds at most ReorderWindow
-// records, and every record it emits is checked against the last one emitted.
+// through a bounded reorder buffer: it holds at most DefaultReorderWindow
+// records, or whatever WithReorderWindow sets, and every record it emits is
+// checked against the last one emitted.
+//
 // Stored order is close to sorted order but not equal to it — a level2_batch
 // update stamped at T can arrive after a match stamped at T+40ms — and the
 // buffer absorbs exactly that. If a record ever emerges out of order, the
