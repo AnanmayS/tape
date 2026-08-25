@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: build, vet, test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt-clean:"
+            echo "$unformatted"
+            gofmt -d .
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      # No -short, ever. The determinism test is the one that says replaying a
+      # window twice produces byte-identical output, and it is the whole point
+      # of the project; a flag that can skip it is a flag that eventually does.
+      # None of the suite needs AWS: the S3 and CloudWatch paths run against
+      # in-process fakes.
+      - name: go test
+        run: go test ./...
+
+      - name: go test -race
+        run: go test -race ./...
+
+  docker:
+    name: image builds
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Built, never pushed. This job exists so that a Dockerfile that has
+      # stopped working is a red pull request rather than a failed deploy.
+      - name: docker build
+        run: docker build -t tape:ci .
+
+      - name: the binary runs in the image
+        run: docker run --rm --entrypoint /usr/local/bin/tape tape:ci help
+
+      - name: it does not run as root
+        run: |
+          uid=$(docker inspect --format '{{.Config.User}}' tape:ci)
+          echo "image user: $uid"
+          [ "$uid" = "nonroot:nonroot" ] || [ "$uid" = "65532:65532" ]
+
+  terraform:
+    name: terraform fmt and validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff terraform
+
+      # -backend=false initialises the provider without touching state, so this
+      # needs no credentials and creates nothing. validate is a type and
+      # reference check, not a plan: it cannot tell you the apply will succeed,
+      # and the deploy runbook in docs/deploy.md says so out loud.
+      - name: terraform init
+        run: terraform -chdir=terraform init -backend=false
+
+      - name: terraform validate
+        run: terraform -chdir=terraform validate

@@ -1,0 +1,137 @@
+name: Deploy image to ECR
+
+# Manual only. Nothing here should ever run because a commit landed: pushing an
+# image is the first half of replacing a running capture, and the second half is
+# a decision a human makes with the tape in front of them.
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Extra tag to push alongside the commit SHA (terraform's image_tag default is 'latest')"
+        required: false
+        default: latest
+      redeploy:
+        description: "Force the ECS service onto the new image after pushing"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  # AWS is not configured in this repository yet, and this job is what says so
+  # instead of a stack trace from an action that was handed an empty role ARN.
+  # It is a check, not a gate to route around: everything below waits on it.
+  preflight:
+    name: check AWS configuration
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+
+    steps:
+      - id: check
+        env:
+          ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+        run: |
+          missing=""
+          [ -n "$ROLE_ARN" ] || missing="$missing secrets.AWS_DEPLOY_ROLE_ARN"
+          [ -n "$AWS_REGION" ] || missing="$missing vars.AWS_REGION"
+          [ -n "$ECR_REPOSITORY" ] || missing="$missing vars.ECR_REPOSITORY"
+
+          if [ -n "$missing" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Deploy skipped: AWS is not configured"
+              echo
+              echo "Missing:"
+              for m in $missing; do echo "- \`$m\`"; done
+              echo
+              echo "This repository has no AWS credentials and no account id in it, on purpose."
+              echo "To enable this workflow:"
+              echo
+              echo "1. \`terraform -chdir=terraform apply\` to create the ECR repository, and take"
+              echo "   its name from the \`ecr_repository_url\` output."
+              echo "2. Create an IAM role trusting this repository through GitHub's OIDC provider,"
+              echo "   with permission to push to that one repository. No access keys."
+              echo "3. Set repository variables \`AWS_REGION\` and \`ECR_REPOSITORY\`, and the secret"
+              echo "   \`AWS_DEPLOY_ROLE_ARN\`."
+              echo
+              echo "Until then, \`docs/deploy.md\` describes the same push by hand, which is how"
+              echo "the first image gets there anyway."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "AWS is not configured; skipping the deploy. See the job summary."
+            exit 0
+          fi
+
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
+  push:
+    name: build and push
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The image that gets deployed is built from a commit that passed the
+      # suite, so the suite runs here too rather than being taken on trust from
+      # a green tick on another workflow.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: go test
+        run: go test ./...
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # The registry comes from the login step and the repository from a
+      # variable, so no account id is written into this repository.
+      - name: build and push
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          EXTRA_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          docker build -t "$REGISTRY/$REPOSITORY:$GITHUB_SHA" .
+          docker push "$REGISTRY/$REPOSITORY:$GITHUB_SHA"
+          if [ -n "$EXTRA_TAG" ]; then
+            docker tag "$REGISTRY/$REPOSITORY:$GITHUB_SHA" "$REGISTRY/$REPOSITORY:$EXTRA_TAG"
+            docker push "$REGISTRY/$REPOSITORY:$EXTRA_TAG"
+          fi
+          echo "pushed \`$REPOSITORY:$GITHUB_SHA\`${EXTRA_TAG:+ and \`$REPOSITORY:$EXTRA_TAG\`}" >> "$GITHUB_STEP_SUMMARY"
+
+      # Off by default. Redeploying stops the running ingester before starting
+      # the replacement — one feed, one capture, no overlap — so it is a gap in
+      # the tape, and whoever presses it should mean it. Needs ecs:UpdateService
+      # and ecs:DescribeServices on the deploy role, which the push-only role
+      # above does not have to have.
+      - name: force new deployment
+        if: ${{ inputs.redeploy }}
+        env:
+          CLUSTER: ${{ vars.ECS_CLUSTER }}
+          SERVICE: ${{ vars.ECS_SERVICE }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CLUSTER" ] || [ -z "$SERVICE" ]; then
+            echo "vars.ECS_CLUSTER and vars.ECS_SERVICE are not set; nothing to redeploy." >&2
+            exit 1
+          fi
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" --force-new-deployment
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
