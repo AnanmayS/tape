@@ -1,0 +1,29 @@
+# Binaries
+/bin/
+/tape
+*.exe
+
+# Test and build output
+*.out
+/coverage.*
+
+# Captured data — never commit market data
+/data/
+*.tape
+*.ndjson
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+*.swp
