@@ -1,11 +1,17 @@
 // Package capture wires a feed to a tape file: a reader goroutine pulls frames
-// off the socket into a buffered channel, and the writer goroutine drains that
-// channel to disk.
+// off the socket into a queue, and the writer goroutine drains that queue to
+// disk.
 //
 // The split is not decoration. A socket read that waits on a disk write is a
-// socket read that stops draining the kernel buffer, and the channel between
-// the two is the thing M7 has to size and measure. It goes in now so that the
-// measurement later is of the real design rather than of a rewrite.
+// socket read that stops draining the kernel buffer, and what the queue does
+// when it fills is the backpressure policy — block, drop or buffer. It is
+// PolicyBlock, by measurement rather than by default; policy.go says what each
+// one costs and CLAUDE.md carries the number that decided it.
+//
+// Two things about that queue are instrumented, because they are the two halves
+// of the same question. Its depth says the writer fell behind. The per-record
+// write latency in the Summary says by how much and how often, which is what
+// decides whether "behind" is a burst the queue absorbs or a rate it cannot.
 package capture
 
 import (
@@ -61,6 +67,10 @@ type Config struct {
 	// Buffer is the depth of the channel between reader and writer.
 	Buffer int
 
+	// Policy is what happens when that channel is full. Empty means
+	// PolicyBlock; policy.go says why.
+	Policy Policy
+
 	// FlushInterval bounds how long written records sit in the buffer.
 	FlushInterval time.Duration
 
@@ -84,6 +94,9 @@ func (c *Config) withDefaults() {
 	if c.Buffer <= 0 {
 		c.Buffer = 4096
 	}
+	if c.Policy == "" {
+		c.Policy = PolicyBlock
+	}
 	if c.FlushInterval <= 0 {
 		c.FlushInterval = time.Second
 	}
@@ -100,6 +113,7 @@ type Summary struct {
 	Feed    string
 	Product string
 	Format  Format
+	Policy  Policy
 	Started time.Time
 	Ended   time.Time
 
@@ -130,9 +144,19 @@ type Summary struct {
 	// ExchangeErrors counts error frames the exchange sent back.
 	ExchangeErrors int64
 
-	// MaxQueueDepth is the deepest the reader-to-writer channel got. It is the
-	// first real number about backpressure, and M7's starting point.
+	// MaxQueueDepth is the deepest the reader-to-writer queue got, counting
+	// anything the buffer policy was holding in front of the channel.
 	MaxQueueDepth int
+
+	// Dropped counts frames the backpressure policy discarded. Every one of
+	// them is also inside Gaps, because a drop is written into the stream as a
+	// gap record; the two are not added together.
+	Dropped int64
+
+	// WriteLatency is the distribution of per-record write times. It is the
+	// number that says whether the writer can drain the queue, and its tail is
+	// where a columnar batch flush shows up.
+	WriteLatency Latency
 
 	Files []string
 
@@ -182,7 +206,10 @@ func (s Summary) captureAttrs() []any {
 		"stale_messages", s.StaleMessages,
 		"decode_errors", s.DecodeErrors,
 		"exchange_errors", s.ExchangeErrors,
+		"policy", string(s.Policy),
 		"max_queue_depth", s.MaxQueueDepth,
+		"dropped", s.Dropped,
+		"write_latency", s.WriteLatency.String(),
 		"messages_per_sec", fmt.Sprintf("%.1f", s.MessagesPerSecond()),
 	}
 }
@@ -192,6 +219,9 @@ func (s Summary) captureAttrs() []any {
 // session that died halfway still wrote what it wrote.
 func Run(ctx context.Context, f feed.Feed, cfg Config) (Summary, error) {
 	cfg.withDefaults()
+	if err := validatePolicy(cfg.Policy); err != nil {
+		return Summary{}, err
+	}
 	log := cfg.Log.With("feed", f.Name(), "product", f.Product())
 
 	// The uploader is wired in through the writer's closed-file hook, so a
@@ -223,6 +253,7 @@ func Run(ctx context.Context, f feed.Feed, cfg Config) (Summary, error) {
 		Feed:    f.Name(),
 		Product: f.Product(),
 		Format:  cfg.Format,
+		Policy:  cfg.Policy,
 		Started: time.Now().UTC(),
 	}
 	if cfg.Store != nil {
@@ -235,16 +266,21 @@ func Run(ctx context.Context, f feed.Feed, cfg Config) (Summary, error) {
 	ctx, stopReader := context.WithCancel(ctx)
 	defer stopReader()
 
-	// Reader goroutine: socket to channel.
-	frames := make(chan feed.Frame, cfg.Buffer)
+	// The queue carries the backpressure policy; see policy.go. writerDone is
+	// how it learns that nobody is receiving any more, which is the one case
+	// where a policy that never discards has to.
+	q := newQueue(cfg.Policy, cfg.Buffer)
+	writerDone := make(chan struct{})
+
+	// Reader goroutine: socket to queue.
 	readErr := make(chan error, 1)
 	go func() {
-		err := f.Run(ctx, feed.ChanSink(frames))
-		close(frames)
+		err := f.Run(ctx, q)
+		q.close(writerDone)
 		readErr <- err
 	}()
 
-	// Writer goroutine: channel to disk. This is that goroutine.
+	// Writer goroutine: queue to disk. This is that goroutine.
 	flush := time.NewTicker(cfg.FlushInterval)
 	defer flush.Stop()
 
@@ -252,15 +288,25 @@ func Run(ctx context.Context, f feed.Feed, cfg Config) (Summary, error) {
 drain:
 	for {
 		select {
-		case fr, ok := <-frames:
+		case fr, ok := <-q.ch:
 			if !ok {
 				break drain
 			}
-			d := len(frames) + 1
+			d := q.depth() + 1
 			if d > sum.MaxQueueDepth {
 				sum.MaxQueueDepth = d
 			}
 			cfg.Metrics.QueueDepth(d)
+
+			// Drops go into the stream ahead of the frame that followed them,
+			// the same way a sequence gap does: here is where the stream broke,
+			// and here is what resumed.
+			if n := q.takePending(); n > 0 {
+				if err := sink.recordDrop(n, fr.Recv); err != nil {
+					writeErr = err
+					break drain
+				}
+			}
 			if err := sink.handle(fr); err != nil {
 				writeErr = err
 				break drain
@@ -272,6 +318,14 @@ drain:
 			}
 		}
 	}
+	close(writerDone)
+
+	// A drop that landed after the last frame still has to be recorded, or the
+	// session would end with frames missing and nothing saying so.
+	if n := q.takePending(); n > 0 && writeErr == nil {
+		writeErr = sink.recordDrop(n, time.Now().UTC())
+	}
+	sum.WriteLatency = sink.hist.summary()
 
 	// Close before the uploader: closing the writer is what hands the last
 	// file over, and a drain started before that would miss it.
@@ -299,6 +353,7 @@ drain:
 	}
 
 	sum.Ended = time.Now().UTC()
+	sum.Dropped = q.dropCount()
 	st := w.Stats()
 	sum.Records, sum.Bytes, sum.Rotations, sum.Files = st.Records, st.Bytes, st.Rotations, st.Files
 
@@ -339,11 +394,37 @@ func newWriter(cfg Config, symbol string, opts []tapefile.Option) (recordWriter,
 // sink turns frames into records. It owns the writer, the sequence tracker and
 // the counters, so that every path from a frame to disk goes through one place.
 type sink struct {
-	w   recordWriter
-	seq *seqTracker
-	log *slog.Logger
-	sum *Summary
-	met metrics.Recorder
+	w    recordWriter
+	seq  *seqTracker
+	log  *slog.Logger
+	sum  *Summary
+	met  metrics.Recorder
+	hist hist
+}
+
+// write times one record on its way to disk. Two clock reads per record is
+// about 50ns against a write that costs microseconds, and it buys the only
+// direct measurement of whether the writer can keep up with the socket.
+func (s *sink) write(f func() error) error {
+	start := time.Now()
+	err := f()
+	s.hist.observe(time.Since(start))
+	return err
+}
+
+// recordDrop writes n discarded frames into the stream as a gap record.
+//
+// This is the whole price of a policy that sheds load, and it is not optional:
+// a window that lost frames must say so, and on a monotonic feed the sequence
+// numbers cannot. It counts as a gap everywhere a gap counts — the summary, the
+// CloudWatch metric, the alarm whose threshold is zero — because it is one.
+func (s *sink) recordDrop(n int64, at time.Time) error {
+	s.sum.Gaps++
+	s.met.Gap()
+	s.log.Warn("frames dropped by backpressure policy", "dropped", n, "at", at)
+	return s.write(func() error {
+		return s.w.WriteGap(tapefile.Gap{At: at, Dropped: uint64(n)})
+	})
 }
 
 // handle writes one frame and updates counters.
@@ -362,7 +443,9 @@ func (s *sink) handle(fr feed.Frame) error {
 		// Record where the fresh subscription landed before anything from it
 		// is written, so a replayer sees the boundary in the right place.
 		s.seq.reseed()
-		return s.w.WriteReseed(tapefile.Reseed{At: fr.Recv, Reason: fr.Reason})
+		return s.write(func() error {
+			return s.w.WriteReseed(tapefile.Reseed{At: fr.Recv, Reason: fr.Reason})
+		})
 
 	case feed.KindData:
 		s.sum.Messages++
@@ -391,7 +474,9 @@ func (s *sink) handle(fr feed.Frame) error {
 			}
 		}
 
-		if err := s.w.WriteMessage(tapefile.Message{Recv: fr.Recv, Raw: fr.Raw}); err != nil {
+		if err := s.write(func() error {
+			return s.w.WriteMessage(tapefile.Message{Recv: fr.Recv, Raw: fr.Raw})
+		}); err != nil {
 			return err
 		}
 
@@ -444,7 +529,9 @@ func (s *sink) checkSequence(e event.Event, at time.Time) error {
 		"expected", a.Expected,
 		"got", a.Got,
 		"missing", int64(a.Got)-int64(a.Expected))
-	return s.w.WriteGap(tapefile.Gap{At: at, Expected: a.Expected, Got: a.Got})
+	return s.write(func() error {
+		return s.w.WriteGap(tapefile.Gap{At: at, Expected: a.Expected, Got: a.Got})
+	})
 }
 
 // progressEvery is how often the running count is logged. A constant rather
