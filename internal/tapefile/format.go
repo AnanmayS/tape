@@ -1,6 +1,6 @@
-// Package tapefile implements the on-disk capture format.
+// Package tapefile implements the v1 on-disk capture format.
 //
-// A tape file is a small fixed header followed by length-prefixed records
+// A v1 tape file is a small fixed header followed by length-prefixed records
 // appended in arrival order. It is append-only by construction: the writer
 // opens each file exactly once with O_APPEND and never seeks, and nothing in
 // this package can rewrite bytes that were already flushed.
@@ -9,6 +9,19 @@
 //
 //	header  = magic[4] "TAPE" | version uint16 LE | reserved uint16 LE
 //	record  = type uint8 | length uint32 LE | payload[length]
+//
+// # Two formats, one version byte
+//
+// The delta-encoded columnar format is version 2 and lives in package colfmt.
+// It shares this header, this record vocabulary and this package's Rotator, and
+// differs only in what sits between the header and the end of the file.
+//
+// The reader in this package reads v1 and refuses everything else, by version
+// byte, before it interprets a single byte of the body — which is the whole
+// reason a version byte is written at all. A v2 file cannot be misread as a v1
+// one, and TestReaderRefusesUnknownVersion is that guarantee written down.
+// Callers that want either format ask colfmt.OpenRecords, which dispatches on
+// the version byte and hands back the right reader.
 //
 // Every record payload uses the same shape: a fixed-size prefix followed by an
 // optional variable-length tail that runs to the end of the payload. That keeps
@@ -92,24 +105,56 @@ var (
 	ErrShortPayload  = errors.New("tapefile: record payload shorter than its fixed prefix")
 )
 
-// encodeHeader returns the file header bytes.
-func encodeHeader() []byte {
+// Records is a stored record stream: the records of one tape file, in stored
+// order, as the (type, payload) pairs this package's vocabulary is written in.
+//
+// Both on-disk formats present one, and they present the same one — a v2 file
+// hands back byte-identical payloads to the v1 file holding the same records.
+// That is what lets everything above this line be written once.
+type Records interface {
+	// Next returns the next record, or io.EOF at a clean end of file. The
+	// payload is owned by the caller.
+	Next() (RecordType, []byte, error)
+
+	// Version is the format version of the file being read.
+	Version() uint16
+
+	// Close releases the underlying stream.
+	Close() error
+}
+
+// EncodeHeader returns the file header bytes for format version v. The magic is
+// shared by every format so that "is this a tape file" and "which format is it"
+// stay two separate questions with two separate answers.
+func EncodeHeader(v uint16) []byte {
 	b := make([]byte, HeaderSize)
 	copy(b[0:4], magic[:])
-	binary.LittleEndian.PutUint16(b[4:6], Version)
+	binary.LittleEndian.PutUint16(b[4:6], v)
 	binary.LittleEndian.PutUint16(b[6:8], 0) // reserved
 	return b
 }
 
-// decodeHeader validates a file header and returns its version.
+// HeaderVersion validates the magic on a header and returns the version it
+// declares, without judging whether that version is one this package can read.
+// It is what a dispatcher calls before choosing a reader.
+func HeaderVersion(b []byte) (uint16, error) {
+	if len(b) < HeaderSize || string(b[0:4]) != string(magic[:]) {
+		return 0, ErrBadMagic
+	}
+	return binary.LittleEndian.Uint16(b[4:6]), nil
+}
+
+// encodeHeader returns the v1 file header bytes.
+func encodeHeader() []byte { return EncodeHeader(Version) }
+
+// decodeHeader validates a file header and returns its version. It accepts v1
+// and nothing else: a reader that guessed at a body it does not know the layout
+// of is the failure this byte exists to prevent.
 func decodeHeader(b []byte) (uint16, error) {
-	if len(b) < HeaderSize {
-		return 0, ErrBadMagic
+	v, err := HeaderVersion(b)
+	if err != nil {
+		return 0, err
 	}
-	if string(b[0:4]) != string(magic[:]) {
-		return 0, ErrBadMagic
-	}
-	v := binary.LittleEndian.Uint16(b[4:6])
 	if v != Version {
 		return 0, fmt.Errorf("%w: file is v%d, this build reads v%d", ErrBadVersion, v, Version)
 	}
