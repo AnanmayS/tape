@@ -42,9 +42,6 @@ type Uploader struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// sleep waits between attempts, reporting false if the wait was cut short.
-	sleep func(time.Duration) bool
-
 	mu    sync.Mutex
 	stats UploadStats
 }
@@ -76,11 +73,6 @@ type UploadConfig struct {
 
 	// Drain is how long Close waits for queued uploads to finish.
 	Drain time.Duration
-
-	// sleep replaces the wait between attempts. Tests set it so that a retry
-	// sequence costs no wall-clock time; it is unexported because a caller
-	// outside this package has no business skipping a backoff.
-	sleep func(time.Duration) bool
 }
 
 func (c *UploadConfig) withDefaults() {
@@ -164,9 +156,6 @@ func NewUploader(st Store, cfg UploadConfig) *Uploader {
 		done:   make(chan struct{}),
 		ctx:    ctx,
 		cancel: cancel,
-	}
-	if u.sleep = cfg.sleep; u.sleep == nil {
-		u.sleep = u.realSleep
 	}
 	go u.run()
 	return u
@@ -262,7 +251,7 @@ func (u *Uploader) upload(j job) {
 		d := backoffDelay(u.cfg.Base, u.cfg.Max, attempt-1)
 		u.bump(func(s *UploadStats) { s.Retries++ })
 		log.Warn("upload failed, retrying", "err", err, "attempt", attempt, "retry_in", d.String())
-		if !u.sleep(d) {
+		if !u.wait(d) {
 			u.bump(func(s *UploadStats) { s.Failed++ })
 			log.Error("upload abandoned during shutdown",
 				"err", err, "attempts", attempt,
@@ -299,7 +288,8 @@ func (u *Uploader) attempt(j job) (int64, error) {
 	return st.Size(), nil
 }
 
-func (u *Uploader) realSleep(d time.Duration) bool {
+// wait sleeps between attempts, reporting false if a shutdown cut it short.
+func (u *Uploader) wait(d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {

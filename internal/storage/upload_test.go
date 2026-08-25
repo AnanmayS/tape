@@ -67,13 +67,15 @@ func quietLog() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// testUploadConfig is the shared configuration: no real sleeping, so a six
-// attempt backoff sequence costs nothing.
+// testUploadConfig is the shared configuration: the real retry loop, with the
+// backoff wound down to microseconds so a six-attempt sequence costs nothing.
+// The knobs are the production ones — no test-only path through the retry.
 func testUploadConfig() UploadConfig {
 	return UploadConfig{
 		Log:   quietLog(),
+		Base:  time.Microsecond,
+		Max:   time.Microsecond,
 		Drain: 10 * time.Second,
-		sleep: func(time.Duration) bool { return true },
 	}
 }
 
