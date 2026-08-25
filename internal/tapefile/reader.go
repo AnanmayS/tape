@@ -35,18 +35,33 @@ func NewReader(r io.Reader) (*Reader, error) {
 	return &Reader{r: br, version: v}, nil
 }
 
+// OpenReader validates the header on rc and returns a Reader that takes
+// ownership of it: closing the Reader closes rc. It is the streaming entry
+// point, used to read a tape object straight off a store without staging it on
+// local disk first.
+//
+// If the header is bad, rc is closed and the error returned; the caller is
+// never left holding something it did not get a Reader for.
+func OpenReader(rc io.ReadCloser) (*Reader, error) {
+	rd, err := NewReader(rc)
+	if err != nil {
+		rc.Close()
+		return nil, err
+	}
+	rd.c = rc
+	return rd, nil
+}
+
 // Open opens a tape file for reading. Close the Reader when done.
 func Open(path string) (*Reader, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	rd, err := NewReader(f)
+	rd, err := OpenReader(f)
 	if err != nil {
-		f.Close()
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	rd.c = f
 	return rd, nil
 }
 

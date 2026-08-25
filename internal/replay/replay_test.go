@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AnanmayS/tape/internal/storage"
 	"github.com/AnanmayS/tape/internal/tapefile"
 )
 
@@ -259,7 +260,7 @@ func TestSingleFileWindow(t *testing.T) {
 	root := buildWindow(t, func(w *tapefile.Writer) {
 		mustWrite(t, w.WriteMessage(tapefile.Message{Recv: base, Raw: matchFrame(1, base)}))
 	})
-	path := filepath.Join(root, "TEST", "2026-08-25", "20260825T040000Z.tape")
+	path := filepath.Join(root, filepath.FromSlash(storage.Key("TEST", base)))
 
 	recs := replayAll(t, path)
 	if len(recs) != 1 {

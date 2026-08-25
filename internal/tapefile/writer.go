@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/AnanmayS/tape/internal/storage"
 )
 
 // DefaultWindow is the wall-clock rotation window.
@@ -26,14 +28,34 @@ type Stats struct {
 	Files     []string
 }
 
+// File is a tape file the Writer has finished with: closed, flushed, and never
+// to be written again. It is what an OnFileClosed hook receives.
+type File struct {
+	// Path is the file on local disk.
+	Path string
+
+	// Key is the same file's object key, relative to the writer's root. Local
+	// disk and the object store use one layout, so this is Path with the root
+	// taken off — see the storage package.
+	Key string
+
+	// Start is the window the file covers.
+	Start time.Time
+}
+
 // Writer appends records to rotating, append-only tape files.
 //
-// Files are named data/{symbol}/{date}/{window start}.tape and rotate on fixed
-// wall-clock boundaries so that a file's name tells you exactly which window it
-// covers regardless of when the process started. A file is opened for writing
-// exactly once in a Writer's lifetime; attempting to open one twice is an
-// error, not an assertion, because reopening is how append-only quietly stops
-// being true.
+// Files are laid out under root by the canonical storage key —
+// v1/symbol=BTC-USD/date=2026-08-25/hour=14/{window start}.tape — and rotate on
+// fixed wall-clock boundaries, so a file's name tells you exactly which window
+// it covers regardless of when the process started. Local disk and the object
+// store use the same layout deliberately: uploading a file is then copying it
+// to the key its own path already spells, and a window replayed from a bucket
+// and the same window replayed from disk are named identically.
+//
+// A file is opened for writing exactly once in a Writer's lifetime; attempting
+// to open one twice is an error, not an assertion, because reopening is how
+// append-only quietly stops being true.
 type Writer struct {
 	root   string
 	symbol string
@@ -43,6 +65,9 @@ type Writer struct {
 	bw       *bufio.Writer
 	curStart time.Time
 	curPath  string
+	curKey   string
+
+	onClosed func(File)
 
 	opened map[string]bool
 	stats  Stats
@@ -50,32 +75,49 @@ type Writer struct {
 	hdr [recordHeaderSize]byte
 }
 
+// Option configures a Writer.
+type Option func(*Writer)
+
+// OnFileClosed registers a hook called once for every file the Writer finishes
+// with, after its bytes are flushed and its descriptor closed — including the
+// last file, at Close. It is how a completed window reaches the object store.
+//
+// The hook runs on the writer's goroutine, so it must not block: an upload is
+// queued from here, never performed here.
+func OnFileClosed(fn func(File)) Option {
+	return func(w *Writer) { w.onClosed = fn }
+}
+
 // NewWriter creates a Writer rooted at root, partitioning by symbol and
 // rotating every window. No file is created until the first record.
-func NewWriter(root, symbol string, window time.Duration) (*Writer, error) {
+func NewWriter(root, symbol string, window time.Duration, opts ...Option) (*Writer, error) {
 	if window <= 0 {
 		return nil, fmt.Errorf("tapefile: rotation window must be positive, got %v", window)
 	}
-	if symbol == "" {
-		return nil, fmt.Errorf("tapefile: symbol must not be empty")
+	if err := storage.ValidateSymbol(symbol); err != nil {
+		return nil, err
 	}
-	return &Writer{
+	w := &Writer{
 		root:   root,
 		symbol: symbol,
 		window: window,
 		opened: make(map[string]bool),
-	}, nil
+	}
+	for _, o := range opts {
+		o(w)
+	}
+	return w, nil
+}
+
+// KeyFor returns the object key of the window covering instant t, relative to
+// the writer's root.
+func (w *Writer) KeyFor(t time.Time) string {
+	return storage.Key(w.symbol, t.UTC().Truncate(w.window))
 }
 
 // PathFor returns the file path covering instant t.
 func (w *Writer) PathFor(t time.Time) string {
-	start := t.UTC().Truncate(w.window)
-	return filepath.Join(
-		w.root,
-		w.symbol,
-		start.Format("2006-01-02"),
-		start.Format("20060102T150405Z")+".tape",
-	)
+	return filepath.Join(w.root, filepath.FromSlash(w.KeyFor(t)))
 }
 
 // Write appends one record. at selects the rotation window, so records are
@@ -150,6 +192,7 @@ func (w *Writer) open(start time.Time) error {
 	w.bw = bufio.NewWriterSize(f, bufSize)
 	w.curStart = start
 	w.curPath = path
+	w.curKey = w.KeyFor(start)
 	w.stats.Files = append(w.stats.Files, path)
 
 	// Only a brand-new file gets a header. If a previous process died holding
@@ -176,7 +219,15 @@ func (w *Writer) closeCurrent() error {
 	if cerr := w.f.Close(); err == nil {
 		err = cerr
 	}
+	closed := File{Path: w.curPath, Key: w.curKey, Start: w.curStart}
 	w.f, w.bw = nil, nil
+
+	// The hook fires only for a file that closed cleanly. A file whose bytes
+	// would not flush is not a window; copying it to an immutable key that can
+	// never be corrected afterwards would be the worst possible response.
+	if err == nil && w.onClosed != nil {
+		w.onClosed(closed)
+	}
 	return err
 }
 
@@ -194,6 +245,15 @@ func (w *Writer) Path() string {
 		return ""
 	}
 	return w.curPath
+}
+
+// Key returns the object key of the file currently open for writing, or "" if
+// none.
+func (w *Writer) Key() string {
+	if w.f == nil {
+		return ""
+	}
+	return w.curKey
 }
 
 // Stats returns a snapshot of write counters.

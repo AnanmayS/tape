@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/AnanmayS/tape/internal/storage"
 )
 
 func mustWriter(t *testing.T, window time.Duration) (*Writer, string) {
@@ -139,10 +141,13 @@ func TestRotationOnWindowBoundary(t *testing.T) {
 		t.Fatalf("files = %v, want 3", st.Files)
 	}
 
+	// The layout is the storage key layout, spelled as a path. Local disk and
+	// the object store name the same window the same way.
+	part := filepath.Join(root, "v1", "symbol=BTC-USD", "date=2026-08-24", "hour=23")
 	want := []string{
-		filepath.Join(root, "BTC-USD", "2026-08-24", "20260824T230000Z.tape"),
-		filepath.Join(root, "BTC-USD", "2026-08-24", "20260824T230100Z.tape"),
-		filepath.Join(root, "BTC-USD", "2026-08-24", "20260824T230200Z.tape"),
+		filepath.Join(part, "20260824T230000Z.tape"),
+		filepath.Join(part, "20260824T230100Z.tape"),
+		filepath.Join(part, "20260824T230200Z.tape"),
 	}
 	for i, p := range want {
 		if st.Files[i] != p {
@@ -292,5 +297,78 @@ func TestNewWriterValidation(t *testing.T) {
 	}
 	if _, err := NewWriter(t.TempDir(), "", time.Minute); err == nil {
 		t.Fatal("expected error for empty symbol")
+	}
+	// A symbol with a slash in it would invent a partition level.
+	if _, err := NewWriter(t.TempDir(), "BTC/USD", time.Minute); err == nil {
+		t.Fatal("expected error for a symbol that would forge a key component")
+	}
+}
+
+// TestPathIsRootPlusKey is the claim the whole upload path rests on: a file's
+// local path is its object key under the root, so uploading it is copying it to
+// the key its own path already spells.
+func TestPathIsRootPlusKey(t *testing.T) {
+	w, root := mustWriter(t, time.Minute)
+	at := time.Date(2026, 8, 25, 14, 35, 20, 0, time.UTC)
+
+	key := w.KeyFor(at)
+	if want := storage.Key("BTC-USD", at.Truncate(time.Minute)); key != want {
+		t.Errorf("KeyFor = %q, want %q", key, want)
+	}
+	if got, want := w.PathFor(at), filepath.Join(root, filepath.FromSlash(key)); got != want {
+		t.Errorf("PathFor = %q, want %q", got, want)
+	}
+}
+
+// TestOnFileClosed checks the hook uploads hang off: it fires once per file,
+// after the file is closed, with the key that file belongs under — including
+// for the last file, which is closed by Close rather than by a rotation.
+func TestOnFileClosed(t *testing.T) {
+	root := t.TempDir()
+	var closed []File
+	w, err := NewWriter(root, "BTC-USD", time.Minute, OnFileClosed(func(f File) {
+		closed = append(closed, f)
+	}))
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+
+	base := time.Date(2026, 8, 25, 13, 59, 30, 0, time.UTC)
+	for i, ts := range []time.Time{base, base.Add(time.Minute), base.Add(2 * time.Minute)} {
+		if err := w.WriteMessage(Message{Recv: ts, Raw: []byte{byte(i)}}); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+		if n := len(closed); n != i {
+			t.Fatalf("after write %d, %d files had closed; a file must not be handed over while it is still open", i, n)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if len(closed) != 3 {
+		t.Fatalf("hook fired for %d files, want 3 (two rotations and the final close)", len(closed))
+	}
+	// The window crosses an hour boundary, so the files land in two partitions.
+	want := []string{
+		"v1/symbol=BTC-USD/date=2026-08-25/hour=13/20260825T135900Z.tape",
+		"v1/symbol=BTC-USD/date=2026-08-25/hour=14/20260825T140000Z.tape",
+		"v1/symbol=BTC-USD/date=2026-08-25/hour=14/20260825T140100Z.tape",
+	}
+	for i, f := range closed {
+		if f.Key != want[i] {
+			t.Errorf("closed file %d key = %q, want %q", i, f.Key, want[i])
+		}
+		if f.Path != filepath.Join(root, filepath.FromSlash(want[i])) {
+			t.Errorf("closed file %d path = %q", i, f.Path)
+		}
+		// Closed means closed: the bytes are all there to be read.
+		st, err := os.Stat(f.Path)
+		if err != nil {
+			t.Fatalf("closed file %d: %v", i, err)
+		}
+		if st.Size() < HeaderSize {
+			t.Errorf("closed file %d is %d bytes; it was handed over unflushed", i, st.Size())
+		}
 	}
 }

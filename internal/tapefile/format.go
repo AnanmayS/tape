@@ -21,8 +21,11 @@
 // Gap and reseed records are first-class members of the stream, not log lines.
 // A replayer that reads a tape file cannot skip past a gap without seeing it.
 //
-// Files carry no product identifier: the path (data/{symbol}/{date}/{start}.tape)
-// is the partition key, and a writer serves exactly one symbol.
+// Files carry no product identifier: the key
+// (v1/symbol={symbol}/date={date}/hour={hour}/{start}.tape) is the partition,
+// and a writer serves exactly one symbol. That key is the file's path under the
+// local root and its object key in the store, which is one layout rather than
+// two — see the storage package.
 package tapefile
 
 import (
