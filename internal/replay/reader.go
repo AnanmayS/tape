@@ -83,6 +83,12 @@ type Discontinuity struct {
 	// Expected and Got are the sequence numbers of a gap.
 	Expected, Got uint64
 
+	// Dropped is how many frames capture discarded here under a backpressure
+	// policy that sheds load. Non-zero means the loss was this process's doing
+	// rather than the exchange's, which is a different conversation to have and
+	// so a different number to report.
+	Dropped uint64
+
 	// Reason is the reconnect reason of a reseed.
 	Reason string
 }
@@ -90,6 +96,10 @@ type Discontinuity struct {
 func (d Discontinuity) String() string {
 	switch d.Kind {
 	case DiscontinuityGap:
+		if d.Dropped > 0 {
+			return fmt.Sprintf("gap at %s record %d: capture dropped %d frames at %s",
+				d.Position.File, d.Position.Record, d.Dropped, d.At.Format(time.RFC3339Nano))
+		}
 		return fmt.Sprintf("gap at %s record %d: expected sequence %d, got %d (%d missing) at %s",
 			d.Position.File, d.Position.Record, d.Expected, d.Got,
 			int64(d.Got)-int64(d.Expected), d.At.Format(time.RFC3339Nano))
@@ -338,6 +348,7 @@ func discontinuityOf(rec Record) (Discontinuity, bool) {
 			At:       rec.Gap.At,
 			Expected: rec.Gap.Expected,
 			Got:      rec.Gap.Got,
+			Dropped:  rec.Gap.Dropped,
 		}, true
 	case rec.Kind == KindReseed && !rec.Opening:
 		return Discontinuity{

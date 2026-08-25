@@ -35,6 +35,7 @@ const (
 	colGap                           // expected and got, per gap row
 	colReseed                        // reason, per reseed row
 	colFrames                        // the raw feed frame, per message row
+	colDropped                       // sparse: frames capture discarded, by gap row
 )
 
 // columnName is for the measurement harness: a per-column byte breakdown is
@@ -83,6 +84,8 @@ func columnName(id uint8) string {
 		return "reseed"
 	case colFrames:
 		return "frames"
+	case colDropped:
+		return "dropped"
 	default:
 		return fmt.Sprintf("unknown(%d)", id)
 	}
@@ -116,6 +119,13 @@ type row struct {
 	// Gap rows.
 	expected, got uint64
 
+	// dropped is non-zero only on a gap a backpressure policy caused. It is a
+	// sparse column of its own rather than a third entry in the gap column,
+	// because a column that gained an entry per row would make every v2 file
+	// written before it undecodable — and the whole point of the column ids
+	// being append-only is that this never has to happen.
+	dropped uint64
+
 	// Reseed rows.
 	reason string
 }
@@ -139,7 +149,10 @@ func messageRow(m tapefile.Message) row {
 }
 
 func gapRow(g tapefile.Gap) row {
-	return row{kind: tapefile.RecordGap, at: g.At, expected: g.Expected, got: g.Got}
+	return row{
+		kind: tapefile.RecordGap, at: g.At,
+		expected: g.Expected, got: g.Got, dropped: g.Dropped,
+	}
 }
 
 func reseedRow(r tapefile.Reseed) row {
@@ -155,7 +168,9 @@ func (r row) payload() []byte {
 	case tapefile.RecordMessage:
 		return tapefile.EncodeMessage(tapefile.Message{Recv: r.at, Raw: r.raw})
 	case tapefile.RecordGap:
-		return tapefile.EncodeGap(tapefile.Gap{At: r.at, Expected: r.expected, Got: r.got})
+		return tapefile.EncodeGap(tapefile.Gap{
+			At: r.at, Expected: r.expected, Got: r.got, Dropped: r.dropped,
+		})
 	default:
 		return tapefile.EncodeReseed(tapefile.Reseed{At: r.at, Reason: r.reason})
 	}
@@ -184,6 +199,7 @@ func encodeBatch(rows []row) ([]byte, error) {
 	var recv, exchange, sequence []byte
 	var priceScale, priceUnits, sizeScale, sizeUnits []byte
 	var gaps, reseeds, frames []byte
+	var dropped sparseUints
 	var sideText, priceText, sizeText exceptions
 	var types dict
 
@@ -215,6 +231,9 @@ func encodeBatch(rows []row) ([]byte, error) {
 			flags |= FlagGap
 			gaps = binary.AppendUvarint(gaps, r.expected)
 			gaps = binary.AppendUvarint(gaps, r.got)
+			if r.dropped != 0 {
+				dropped.add(i, r.dropped)
+			}
 		case tapefile.RecordReseed:
 			flags |= FlagReseed
 			reseeds = binary.AppendUvarint(reseeds, uint64(len(r.reason)))
@@ -308,6 +327,7 @@ func encodeBatch(rows []row) ([]byte, error) {
 		func() error { return add(colGap, gaps) },
 		func() error { return add(colReseed, reseeds) },
 		func() error { return add(colFrames, frames) },
+		func() error { return add(colDropped, dropped.encode()) },
 	} {
 		if err := step(); err != nil {
 			return nil, err
@@ -376,6 +396,10 @@ func decodeBatch(body []byte, f Footer) ([]row, error) {
 	if err != nil {
 		return nil, err
 	}
+	dropped, err := decodeSparseUints(blocks[colDropped])
+	if err != nil {
+		return nil, err
+	}
 
 	rows := make([]row, n)
 	var prevRecv, prevExchange, prevPrice int64
@@ -393,6 +417,7 @@ func decodeBatch(body []byte, f Footer) ([]row, error) {
 			r.raw = frames.bytes()
 		case tapefile.RecordGap:
 			r.expected, r.got = gaps.uvarint(), gaps.uvarint()
+			r.dropped = dropped[i]
 		case tapefile.RecordReseed:
 			r.reason = string(reseeds.bytes())
 		default:
@@ -510,6 +535,54 @@ func decodeExceptions(b []byte) (map[int]string, error) {
 	}
 	if err := c.done(); err != nil {
 		return nil, fmt.Errorf("%w: exception column: %v", ErrCorrupt, err)
+	}
+	return out, nil
+}
+
+// sparseUints is a sparse integer column: a count, then (row delta, value)
+// pairs. It is the shape a column takes when almost every row has nothing to
+// say — a gap that cost frames is rare even in a session full of gaps — so that
+// the column costs nothing at all when nobody used it.
+type sparseUints struct {
+	buf   []byte
+	count int
+	prev  int
+}
+
+func (s *sparseUints) add(i int, v uint64) {
+	s.buf = binary.AppendUvarint(s.buf, uint64(i-s.prev))
+	s.prev = i
+	s.buf = binary.AppendUvarint(s.buf, v)
+	s.count++
+}
+
+func (s *sparseUints) encode() []byte {
+	if s.count == 0 {
+		return nil
+	}
+	return append(binary.AppendUvarint(nil, uint64(s.count)), s.buf...)
+}
+
+func decodeSparseUints(b []byte) (map[int]uint64, error) {
+	if len(b) == 0 {
+		return nil, nil
+	}
+	c := &cursor{b: b}
+	// Two bytes minimum per entry, so a count larger than half the column is a
+	// corrupt count and not a large one — checked before it sizes an allocation.
+	n64 := c.uvarint()
+	if c.err != nil || n64 > uint64(len(b)/2) {
+		return nil, fmt.Errorf("%w: sparse column claims %d entries in %d bytes",
+			ErrCorrupt, n64, len(b))
+	}
+	out := make(map[int]uint64, int(n64))
+	idx := 0
+	for i := uint64(0); i < n64; i++ {
+		idx += int(c.uvarint())
+		out[idx] = c.uvarint()
+	}
+	if err := c.done(); err != nil {
+		return nil, fmt.Errorf("%w: sparse column: %v", ErrCorrupt, err)
 	}
 	return out, nil
 }

@@ -29,7 +29,12 @@
 //
 //	RecordMessage = recvUnixNano int64 LE | raw feed frame bytes
 //	RecordGap     = atUnixNano   int64 LE | expected uint64 LE | got uint64 LE
+//	                [| dropped uint64 LE]
 //	RecordReseed  = atUnixNano   int64 LE | reason UTF-8 bytes
+//
+// The gap record's drop count is that tail in practice: it appears only on a
+// gap caused by capture shedding load, so a sequence gap is the same 24 bytes
+// it has always been and no file needs rewriting.
 //
 // Gap and reseed records are first-class members of the stream, not log lines.
 // A replayer that reads a tape file cannot skip past a gap without seeing it.

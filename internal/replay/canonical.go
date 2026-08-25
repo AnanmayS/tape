@@ -76,6 +76,12 @@ type canonGap struct {
 	Expected uint64 `json:"expected"`
 	Got      uint64 `json:"got"`
 	Missing  int64  `json:"missing"`
+	// Dropped appears only on a gap capture caused by shedding load, where the
+	// sequence numbers say nothing and the count is the whole story. It is
+	// optional in the sense DecodeError and RawB64 are: a documented field that
+	// appears exactly when the record has one, never as a zero standing in for
+	// a measurement nobody made.
+	Dropped uint64 `json:"dropped,omitempty"`
 }
 
 // canonReseed is the serialized form of a reseed record.
@@ -143,6 +149,7 @@ func (e *CanonicalEncoder) Encode(rec Record) error {
 			Expected: rec.Gap.Expected,
 			Got:      rec.Gap.Got,
 			Missing:  int64(rec.Gap.Got) - int64(rec.Gap.Expected),
+			Dropped:  rec.Gap.Dropped,
 		})
 
 	case KindReseed:

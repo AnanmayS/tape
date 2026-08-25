@@ -372,3 +372,35 @@ func TestOnFileClosed(t *testing.T) {
 		}
 	}
 }
+
+// A gap caused by capture shedding load carries the count as an optional tail.
+// The two things that must both be true: the tail round-trips, and a gap
+// without one still encodes to exactly the 24 bytes every file already on disk
+// holds — otherwise adding the field would have silently rewritten the format.
+func TestGapDropTail(t *testing.T) {
+	at := time.Date(2026, 8, 25, 4, 0, 0, 7, time.UTC)
+
+	seq := EncodeGap(Gap{At: at, Expected: 41, Got: 99})
+	if len(seq) != 24 {
+		t.Fatalf("a sequence gap encodes to %d bytes, want the original 24", len(seq))
+	}
+	got, err := DecodeGap(seq)
+	if err != nil {
+		t.Fatalf("DecodeGap: %v", err)
+	}
+	if got.Dropped != 0 {
+		t.Fatalf("Dropped = %d on a gap with no tail, want 0", got.Dropped)
+	}
+
+	drop := EncodeGap(Gap{At: at, Dropped: 5813})
+	if len(drop) != 32 {
+		t.Fatalf("a drop gap encodes to %d bytes, want 32", len(drop))
+	}
+	got, err = DecodeGap(drop)
+	if err != nil {
+		t.Fatalf("DecodeGap: %v", err)
+	}
+	if got.Dropped != 5813 || !got.At.Equal(at) || got.Expected != 0 || got.Got != 0 {
+		t.Fatalf("round trip gave %+v", got)
+	}
+}

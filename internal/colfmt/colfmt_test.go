@@ -322,7 +322,7 @@ func sameRow(a, b row) bool {
 		a.size == b.size &&
 		a.hasSequence == b.hasSequence && a.sequence == b.sequence &&
 		a.hasExchange == b.hasExchange && a.exchange.Equal(b.exchange) &&
-		a.expected == b.expected && a.got == b.got &&
+		a.expected == b.expected && a.got == b.got && a.dropped == b.dropped &&
 		a.reason == b.reason
 }
 
@@ -756,5 +756,46 @@ func TestEmptyWindowIsAValidFile(t *testing.T) {
 	}
 	if _, _, err := rd.Next(); !errors.Is(err, io.EOF) {
 		t.Fatalf("Next on an empty file: %v, want io.EOF", err)
+	}
+}
+
+// The drop count is a sparse column, so a batch with no drops in it must not
+// carry the column at all — that is what keeps every v2 file written before the
+// column existed decodable by this build, and this one decodable by the last.
+func TestDropCountIsSparse(t *testing.T) {
+	plain := []row{
+		{kind: tapefile.RecordGap, at: base, expected: 10, got: 20},
+		{kind: tapefile.RecordMessage, at: base.Add(time.Millisecond), raw: []byte(`{"type":"heartbeat"}`)},
+	}
+	batch, err := encodeBatch(plain)
+	if err != nil {
+		t.Fatalf("encodeBatch: %v", err)
+	}
+	body, _, err := readBatch(bytes.NewReader(batch))
+	if err != nil {
+		t.Fatalf("readBatch: %v", err)
+	}
+	blocks, err := walkBlocks(body)
+	if err != nil {
+		t.Fatalf("walkBlocks: %v", err)
+	}
+	for _, b := range blocks {
+		if b.id == colDropped {
+			t.Fatalf("a batch with no drops wrote a %s column of %d bytes",
+				columnName(colDropped), b.rawLen)
+		}
+	}
+
+	withDrops := []row{
+		{kind: tapefile.RecordGap, at: base, dropped: 1},
+		{kind: tapefile.RecordMessage, at: base.Add(time.Millisecond), raw: []byte(`{"type":"heartbeat"}`)},
+		{kind: tapefile.RecordGap, at: base.Add(2 * time.Millisecond), expected: 7, got: 9, dropped: 65_000},
+		{kind: tapefile.RecordReseed, at: base.Add(3 * time.Millisecond), reason: "reconnect"},
+	}
+	got := roundTrip(t, withDrops)
+	for i := range withDrops {
+		if !sameRow(withDrops[i], got[i]) {
+			t.Fatalf("row %d round-tripped to %+v, want %+v", i, got[i], withDrops[i])
+		}
 	}
 }
