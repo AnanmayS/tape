@@ -1,0 +1,16 @@
+# The build stage needs the module files and the Go source. Nothing else in
+# this repo belongs in a build context, and captured market data least of all.
+.git
+.github
+data
+terraform
+docs
+*.tape
+*.tape.gz
+*.ndjson
+tape
+bin
+Dockerfile
+.dockerignore
+README.md
+CLAUDE.md
