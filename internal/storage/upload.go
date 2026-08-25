@@ -132,16 +132,18 @@ func (s UploadStats) Pending() int64 {
 	return s.Added - (s.Uploaded + s.Existed + s.Failed + s.Dropped)
 }
 
-// LogAttrs renders the stats for a structured logger.
+// LogAttrs renders the stats for a structured logger. The keys are prefixed
+// because these attributes are logged alongside a capture summary, and a
+// second bare "bytes" in one record is worse than no number at all.
 func (s UploadStats) LogAttrs() []any {
 	return []any{
-		"added", s.Added,
-		"uploaded", s.Uploaded,
-		"already_present", s.Existed,
-		"failed", s.Failed,
-		"dropped", s.Dropped,
-		"retries", s.Retries,
-		"bytes", s.Bytes,
+		"upload_added", s.Added,
+		"upload_uploaded", s.Uploaded,
+		"upload_already_present", s.Existed,
+		"upload_failed", s.Failed,
+		"upload_dropped", s.Dropped,
+		"upload_retries", s.Retries,
+		"upload_bytes", s.Bytes,
 	}
 }
 
