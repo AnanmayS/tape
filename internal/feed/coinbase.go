@@ -76,18 +76,54 @@ func (c *Coinbase) Product() string { return c.ProductID }
 // across a reconnect, where continuity cannot be proven at all.
 func (c *Coinbase) SeqMode() SeqMode { return SeqMonotonic }
 
-// Run connects, subscribes, and reads frames until ctx is done or the
-// connection fails.
+// Run connects, subscribes, and reads frames until ctx is done, reconnecting
+// with exponential backoff for as long as the context lives.
+//
+// It does not give up on its own. A capture session ends when it is told to
+// end; a feed that quit after N failures would hand back a window that looks
+// complete and is not. Every reconnection puts a reseed frame in the stream,
+// so a replayer can see that the book was rebuilt there.
 func (c *Coinbase) Run(ctx context.Context, out chan<- Frame) error {
-	err := c.session(ctx, out)
-	if ctx.Err() != nil {
-		return nil
+	b := newBackoff(backoffBase, backoffMax)
+	reason := "subscribed"
+
+	for {
+		started := time.Now()
+		err := c.session(ctx, out, reason)
+		if ctx.Err() != nil {
+			return nil
+		}
+		lasted := time.Since(started)
+		if lasted >= stableFor {
+			b.reset()
+		}
+
+		delay := b.next()
+		c.Log.Warn("feed disconnected, reconnecting",
+			"feed", c.Name(),
+			"err", err,
+			"connected_for", lasted.Round(time.Millisecond).String(),
+			"retry_in", delay.Round(time.Millisecond).String())
+
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil
+		}
+		reason = "reconnect: " + errText(err)
 	}
-	return err
+}
+
+func errText(err error) string {
+	if err == nil {
+		return "connection closed"
+	}
+	return err.Error()
 }
 
 // session runs exactly one connection: dial, subscribe, read until failure.
-func (c *Coinbase) session(ctx context.Context, out chan<- Frame) error {
+// reason is carried into the reseed frame the subscription emits.
+func (c *Coinbase) session(ctx context.Context, out chan<- Frame, reason string) error {
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 
@@ -114,14 +150,15 @@ func (c *Coinbase) session(ctx context.Context, out chan<- Frame) error {
 		"feed", c.Name(),
 		"url", c.URL,
 		"product", c.ProductID,
-		"channels", c.Channels)
+		"channels", c.Channels,
+		"reason", reason)
 
 	// The subscription is a fresh book from here. Say so in the stream, not
 	// just in the log, so a replayer knows where the book was rebuilt.
 	if !send(ctx, out, Frame{
 		Kind:   KindReseed,
 		Recv:   time.Now().UTC(),
-		Reason: "subscribed",
+		Reason: reason,
 	}) {
 		return ctx.Err()
 	}
