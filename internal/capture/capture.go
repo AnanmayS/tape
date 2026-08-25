@@ -15,10 +15,25 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/AnanmayS/tape/internal/colfmt"
 	"github.com/AnanmayS/tape/internal/event"
 	"github.com/AnanmayS/tape/internal/feed"
 	"github.com/AnanmayS/tape/internal/storage"
 	"github.com/AnanmayS/tape/internal/tapefile"
+)
+
+// Format selects the on-disk format a session writes. Both are read by replay
+// without being told which is which, so this is a storage decision and not a
+// decision about what the data is.
+type Format string
+
+const (
+	// FormatRaw is the v1 record log: every frame written as it arrives.
+	FormatRaw Format = "raw"
+
+	// FormatColumnar is the v2 delta-encoded columnar format, about 5.8 times
+	// smaller on a real BTC-USD window.
+	FormatColumnar Format = "columnar"
 )
 
 // Config configures a capture session.
@@ -35,6 +50,10 @@ type Config struct {
 	// Upload configures the uploader used when Store is set.
 	Upload storage.UploadConfig
 
+	// Format is the on-disk format. Empty means FormatRaw; see the flag's help
+	// in cmd/tape for why that is still the default.
+	Format Format
+
 	// Window is the wall-clock rotation window.
 	Window time.Duration
 
@@ -50,6 +69,9 @@ type Config struct {
 }
 
 func (c *Config) withDefaults() {
+	if c.Format == "" {
+		c.Format = FormatRaw
+	}
 	if c.Window <= 0 {
 		c.Window = tapefile.DefaultWindow
 	}
@@ -68,6 +90,7 @@ func (c *Config) withDefaults() {
 type Summary struct {
 	Feed    string
 	Product string
+	Format  Format
 	Started time.Time
 	Ended   time.Time
 
@@ -179,7 +202,7 @@ func Run(ctx context.Context, f feed.Feed, cfg Config) (Summary, error) {
 		}))
 	}
 
-	w, err := tapefile.NewWriter(cfg.Root, f.Product(), cfg.Window, opts...)
+	w, err := newWriter(cfg, f.Product(), opts)
 	if err != nil {
 		if up != nil {
 			up.Close()
@@ -190,6 +213,7 @@ func Run(ctx context.Context, f feed.Feed, cfg Config) (Summary, error) {
 	sum := Summary{
 		Feed:    f.Name(),
 		Product: f.Product(),
+		Format:  cfg.Format,
 		Started: time.Now().UTC(),
 	}
 	if cfg.Store != nil {
@@ -276,10 +300,35 @@ drain:
 // readerStopTimeout bounds how long shutdown waits for the reader goroutine.
 const readerStopTimeout = 10 * time.Second
 
+// recordWriter is everything capture needs from a tape writer. Both formats
+// present exactly this, which is why choosing between them is a line in a
+// switch rather than a second capture path.
+type recordWriter interface {
+	WriteMessage(tapefile.Message) error
+	WriteGap(tapefile.Gap) error
+	WriteReseed(tapefile.Reseed) error
+	Flush() error
+	Close() error
+	Path() string
+	Stats() tapefile.Stats
+}
+
+func newWriter(cfg Config, symbol string, opts []tapefile.Option) (recordWriter, error) {
+	switch cfg.Format {
+	case FormatColumnar:
+		return colfmt.NewWriter(cfg.Root, symbol, cfg.Window, opts...)
+	case FormatRaw:
+		return tapefile.NewWriter(cfg.Root, symbol, cfg.Window, opts...)
+	default:
+		return nil, fmt.Errorf("capture: unknown format %q (want %s or %s)",
+			cfg.Format, FormatRaw, FormatColumnar)
+	}
+}
+
 // sink turns frames into records. It owns the writer, the sequence tracker and
 // the counters, so that every path from a frame to disk goes through one place.
 type sink struct {
-	w   *tapefile.Writer
+	w   recordWriter
 	seq *seqTracker
 	log *slog.Logger
 	sum *Summary

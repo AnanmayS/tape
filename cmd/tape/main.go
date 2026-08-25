@@ -12,6 +12,7 @@ usage:
   tape capture [flags]            capture the live feed to local tape files
   tape replay [flags] <window>    replay a window to stdout as canonical NDJSON
   tape verify [flags] <window>    read a window and report what is in it
+  tape stat [flags] <window>      measure what a window costs to store
   tape help                       show this message
 
 a window is a directory of .tape files, or a single .tape file.
@@ -32,6 +33,8 @@ func main() {
 		err = runReplay(os.Args[2:])
 	case "verify":
 		err = runVerify(os.Args[2:])
+	case "stat":
+		err = runStat(os.Args[2:])
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return
