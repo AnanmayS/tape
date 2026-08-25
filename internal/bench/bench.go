@@ -1,12 +1,12 @@
 // Package bench drives the capture path at saturation so the backpressure
 // policy can be chosen by measurement.
 //
-// The load generator is the project itself. A captured window is read back
-// through package replay, held in memory as frames, and pushed into
-// capture.Run through the same feed.Sink a live socket pushes into — so the
-// sequence tracking, the gap detection, the rotation and the tape or columnar
-// writing under load are the production ones, not a model of them. What is
-// substituted is the socket, and only the socket.
+// The load generator is the project itself. A captured window is read back with
+// the storage readers, held in memory as frames, and pushed into capture.Run
+// through the same feed.Sink a live socket pushes into — so the sequence
+// tracking, the gap detection, the rotation and the tape or columnar writing
+// under load are the production ones, not a model of them. What is substituted
+// is the socket, and only the socket.
 //
 // # What saturation means here
 //

@@ -40,9 +40,9 @@ func runBench(args []string) error {
 				"Pushes a captured window back through the capture path — sequence tracking,\n"+
 				"gap detection, rotation, tape or columnar writing — as fast as the\n"+
 				"backpressure policy will accept it, and reports what each policy costs.\n\n"+
-				"The load generator is this project: a window is read with the replay\n"+
-				"library, held in memory, and offered to capture through the same sink a\n"+
-				"live socket pushes into. Only the socket is substituted.\n\n"+
+				"The load generator is this project: a window is read back with the\n"+
+				"storage readers, held in memory, and offered to capture through the same\n"+
+				"sink a live socket pushes into. Only the socket is substituted.\n\n"+
 				"With -speed 0 the feed offers frames faster than any exchange sends them,\n"+
 				"which is the point: the number worth having is not the rate at 40 messages\n"+
 				"a second but where the writer stops keeping up and what each policy does\n"+
