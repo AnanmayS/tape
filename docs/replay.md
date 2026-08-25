@@ -26,10 +26,15 @@ anything happened to be read. The arrival index is unique within a window, so
 the key is a strict total order: there is never a residual tie for a sort to
 break arbitrarily, and every machine breaks every tie the same way.
 
-Files are ordered by their path relative to the window root, compared byte-wise.
-Capture names them `{symbol}/{date}/{20060102T150405Z}.tape`, and a fixed-width
-UTC timestamp sorts lexicographically into chronological order — sorting the
-names needs no clock and no parsing.
+Files are ordered by their name relative to the window, compared byte-wise.
+Capture names them
+`v1/symbol={symbol}/date={date}/hour={hour}/{20060102T150405Z}.tape`, and every
+component is fixed-width UTC, so the names sort lexicographically into
+chronological order — sorting them needs no clock and no parsing.
+
+Relative to the *window*, not to any absolute location: the same window replays
+byte-identically out of a local directory and out of an S3 prefix, because
+where it is stored never reaches the output.
 
 A window is one symbol.
 
