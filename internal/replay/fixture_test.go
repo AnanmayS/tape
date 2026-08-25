@@ -45,8 +45,8 @@ import (
 //	go test ./internal/replay -run TestGenerateFixture -fixture.src /tmp/src
 //
 // The generator rotates every 30s rather than every minute, so the fixture
-// spans four files and exercises multi-file windows without carrying four
-// minutes of BTC-USD.
+// spans three files and exercises multi-file windows without having to carry
+// three minutes of BTC-USD.
 
 var (
 	fixtureSrc = flag.String("fixture.src", "",
@@ -65,7 +65,7 @@ const fixtureDir = "testdata/window"
 
 // fixtureWindow materializes the golden fixture into a temp directory and
 // returns its root.
-func fixtureWindow(t *testing.T) string {
+func fixtureWindow(t testing.TB) string {
 	t.Helper()
 	root := t.TempDir()
 	var n int
@@ -223,13 +223,13 @@ func gzipTo(src, dst string) (int64, error) {
 // keeping the raw bytes and receive times exactly as stored. Snapshot frames
 // are skipped; see the note at the top of this file.
 func realFrames(root string, n int) ([]feed.Frame, error) {
-	base, files, err := windowFiles(root)
+	windowRoot, files, err := windowFiles(root)
 	if err != nil {
 		return nil, err
 	}
 	var out []feed.Frame
 	for _, rel := range files {
-		rd, err := tapefile.Open(filepath.Join(base, filepath.FromSlash(rel)))
+		rd, err := tapefile.Open(filepath.Join(windowRoot, filepath.FromSlash(rel)))
 		if err != nil {
 			return nil, err
 		}
