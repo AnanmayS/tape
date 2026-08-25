@@ -172,9 +172,19 @@ collect:
 		}
 	}
 
-	conns, subs := fake.stats()
-	if conns < 3 {
-		t.Fatalf("server saw %d connections, want at least 3", conns)
+	// The client emits a reseed as soon as it has written its subscribe, but
+	// the server only counts the connection after reading that subscribe — so
+	// the count can lag the third reseed. Wait for it rather than sampling once.
+	var conns int
+	var subs []string
+	for start := time.Now(); ; time.Sleep(10 * time.Millisecond) {
+		conns, subs = fake.stats()
+		if conns >= 3 {
+			break
+		}
+		if time.Since(start) > 8*time.Second {
+			t.Fatalf("server saw %d connections, want at least 3", conns)
+		}
 	}
 	// Every reconnection must resubscribe; a reconnect that forgets to is a
 	// socket that sits there silently receiving nothing.
