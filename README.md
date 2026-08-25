@@ -68,10 +68,12 @@ broad one that is half-finished.
 ```
 go build -o tape ./cmd/tape
 ./tape capture -dir data -window 5m
+./tape capture -dir data -format columnar
 ./tape capture -dir data -s3-bucket my-tape-bucket
 ./tape verify data/v1/symbol=BTC-USD/date=2026-08-25
 ./tape verify -s3-bucket my-tape-bucket v1/symbol=BTC-USD/date=2026-08-25
 ./tape replay -continue-on-gap data/v1/symbol=BTC-USD/date=2026-08-25 > window.ndjson
+./tape stat data/v1/symbol=BTC-USD/date=2026-08-25
 ```
 
 Ctrl-C stops the capture cleanly and prints a counted session summary. The
@@ -93,10 +95,16 @@ Every component is fixed-width and byte-sortable, so a prefix scan by symbol,
 day or hour is a literal string prefix and sorting keys is sorting windows by
 time — which is the only query this project has.
 
-Each file is a magic-and-version header followed by length-prefixed records:
+Each file is a magic-and-version header followed by its records. There are two
+formats and the version byte decides which: **v1** is length-prefixed records —
 message records carrying the raw frame verbatim plus a receive timestamp, gap
-records, and reseed records. Files are opened once with `O_APPEND` and never
-reopened.
+records, and reseed records — and **v2** is the same records as delta-encoded
+columnar batches, 5.2x smaller, described in [docs/columnar.md](docs/columnar.md).
+Replay reads either, per file, so a window can hold both. Files are opened once
+with `O_APPEND` and never reopened.
+
+`capture` writes v1 unless given `-format columnar`; the reasoning for that
+default, and the condition for changing it, is in the M5 results below.
 
 With `-s3-bucket`, each file is uploaded as it closes. Local disk stays the
 durable copy: an unreachable bucket costs a re-upload, never a frame. Uploads
@@ -107,13 +115,15 @@ AWS configuration — the ECS task role in production — and are never flags.
 `replay` writes a window to stdout as canonical NDJSON, in a fixed total order
 documented in [docs/replay.md](docs/replay.md). It stops at a gap or a
 reconnect unless told otherwise, and `verify` exits non-zero on a window that
-contains one.
+contains one. `stat` measures what a window costs to store, column by column;
+it is where the compression ratio below comes from.
 
 ## Status
 
-M1 through M4 done: WebSocket ingest, sequence-gap detection, reconnect with
-backoff, deterministic replay, and S3 storage partitioned by symbol, date and
-hour. M5 (delta-encoded columnar format) is next.
+M1 through M5 done: WebSocket ingest, sequence-gap detection, reconnect with
+backoff, deterministic replay, S3 storage partitioned by symbol, date and hour,
+and a delta-encoded columnar format measured at 5.2x against the raw feed. M6
+(Terraform and ECS) is next.
 
 ### M1 and M2 — capture
 
@@ -208,3 +218,78 @@ being run, and the conditional put is exactly the behaviour nobody would notice
 had broken.
 
 The only new dependency is `aws-sdk-go-v2` (config, credentials, s3).
+
+### M5 — columnar storage
+
+Measured on three minutes of live BTC-USD, 6,384 records, captured twice
+concurrently — once per format — so the two numbers are the same market and not
+two different minutes:
+
+| | |
+|---|---|
+| Raw frames — what NDJSON would store | 4,896,303 bytes |
+| v1 tape files | 4,979,337 bytes |
+| v2 columnar | 949,523 bytes |
+| **Compression ratio** | **5.16x against the frames, 5.24x against v1** |
+
+Where the columnar bytes go:
+
+| column | encoded | raw | share of file |
+|---|---|---|---|
+| frames | 888,255 | 4,909,013 | 93.5% |
+| recv timestamp | 22,935 | 23,867 | 2.4% |
+| exchange timestamp | 21,004 | 23,006 | 2.2% |
+| size | 4,604 | 5,768 | 0.5% |
+| sequence | 3,581 | 4,246 | 0.4% |
+| price | 2,007 | 4,331 | 0.2% |
+| message type | 1,312 | 6,531 | 0.1% |
+| presence bitsets, scales, kind, reseed | 4,914 | 17,915 | 0.5% |
+| batch and block framing | 911 | — | 0.1% |
+
+**The raw frames are kept.** Reconstructing them from the columns instead would
+roughly double the ratio, since they are 93.5% of the file, and it is not done:
+byte-exact reconstruction of Coinbase JSON would mean reproducing its field
+order, its full key set and its number formatting forever, and a reconstruction
+that is 99.99% right hands back something the exchange never sent while looking
+completely healthy. The frame is what settles an argument. Everything
+structured costs 6.4% of the file and buys scans that never inflate a frame.
+
+**Determinism survived again.** The M3 golden fixture, transcoded to columnar
+and replayed, produces 2,197,803 bytes of canonical NDJSON and `sha256
+ee9576040361b07272db0cb6e614b02cef53dec1fcc772aeea1fa609b4fb7a21` — the digest
+M3 recorded and M4 carried through the storage move, unchanged. A window with
+some files in each format produces it too, because format is a property of a
+file and the reader hands the replay layer byte-identical records either way.
+
+Reading costs 21%: the same fixture window replays at 109,940 events/sec from
+v1 and 87,317 from v2, both including canonical NDJSON.
+
+**No new dependency.** `klauspost/compress` was allowed for this milestone and
+was measured against stdlib deflate on the real frames. At comparable speed zstd
+compressed this data slightly worse — 6.00x at 141 MB/s for its "better" level
+against 5.99x at 99 MB/s for deflate level 7 — so the format uses
+`compress/flate` at level 8 and the dependency list is unchanged.
+
+**Prices are exact.** Coinbase sends decimal strings and a float64 cannot hold
+them: it cannot represent 80691.53 exactly and cannot remember whether the wire
+said "80691.5" or "80691.50". Prices and sizes are stored as scaled integers,
+and a value takes that path only if re-rendering it reproduces the exchange's
+characters exactly; anything that fails — a leading zero, an exponent, more
+digits than an int64 holds — is stored as its own string instead. Nothing is
+normalised on the way to disk.
+
+**Batches close on records, never on the clock.** The first live columnar
+capture measured 4.29x rather than the 5.7x the fixture predicted, because the
+one-second durability flush was closing a batch every time it fired and 23
+records is not a compression window. A batch now closes on 4096 rows, 4 MiB of
+frames, or a 30-second span of receive timestamps — so what a session writes is
+a function of the frames that went into it, and a hard kill loses at most that
+much. A clean stop loses nothing.
+
+**Raw is still the default.** Capture is the half of this project that cannot be
+re-run, and the columnar writer has not yet been measured under the load M7
+exists to apply. M7 measures both; if columnar sustains the same rate it becomes
+the default then, on a number.
+
+The full design note, the codec measurements and the column-by-column reasoning
+are in [docs/columnar.md](docs/columnar.md).

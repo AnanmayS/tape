@@ -21,8 +21,8 @@
 // v1 window holding the same frames: the reader hands the replay layer the same
 // bytes either way. The columns exist so that a scan — which windows hold
 // trades above X, where does this sequence range live — can read a few tens of
-// kilobytes instead of decompressing megabytes of JSON. On a real BTC-USD
-// window they cost 8.4% of the file; the measurement is in docs/columnar.md.
+// kilobytes instead of decompressing megabytes of JSON. On a live BTC-USD
+// window they cost 6.4% of the file; the measurement is in docs/columnar.md.
 //
 // Reconstructing the frames from the columns instead of storing them was the
 // alternative, and it would roughly double the ratio. It is not done because
