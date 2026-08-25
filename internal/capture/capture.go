@@ -239,7 +239,7 @@ func Run(ctx context.Context, f feed.Feed, cfg Config) (Summary, error) {
 	frames := make(chan feed.Frame, cfg.Buffer)
 	readErr := make(chan error, 1)
 	go func() {
-		err := f.Run(ctx, frames)
+		err := f.Run(ctx, feed.ChanSink(frames))
 		close(frames)
 		readErr <- err
 	}()

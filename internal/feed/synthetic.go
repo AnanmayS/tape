@@ -61,13 +61,13 @@ func (s *Synthetic) now() time.Time {
 
 // Run emits the scripted frames, then returns nil. It returns early with
 // ctx.Err() if the context is cancelled.
-func (s *Synthetic) Run(ctx context.Context, out chan<- Frame) error {
+func (s *Synthetic) Run(ctx context.Context, out Sink) error {
 	step := s.Step
 	if step == 0 {
 		step = 1
 	}
 
-	if !send(ctx, out, Frame{Kind: KindReseed, Recv: s.now(), Reason: "subscribed"}) {
+	if !out.Send(ctx, Frame{Kind: KindReseed, Recv: s.now(), Reason: "subscribed"}) {
 		return ctx.Err()
 	}
 
@@ -81,7 +81,7 @@ func (s *Synthetic) Run(ctx context.Context, out chan<- Frame) error {
 			}
 		}
 		recv := s.now()
-		if !send(ctx, out, Frame{Kind: KindData, Raw: matchJSON(s.ProductID, seq, recv, i), Recv: recv}) {
+		if !out.Send(ctx, Frame{Kind: KindData, Raw: matchJSON(s.ProductID, seq, recv, i), Recv: recv}) {
 			return ctx.Err()
 		}
 
@@ -90,7 +90,7 @@ func (s *Synthetic) Run(ctx context.Context, out chan<- Frame) error {
 			seq += n
 		}
 		if s.SeverAfter[i] {
-			if !send(ctx, out, Frame{
+			if !out.Send(ctx, Frame{
 				Kind:   KindReseed,
 				Recv:   s.now(),
 				Reason: "reconnect: connection reset by peer",

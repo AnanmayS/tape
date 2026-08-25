@@ -1,11 +1,11 @@
 // Package feed defines the source of market data frames and the clients that
 // produce them.
 //
-// A feed is a reader: it pushes frames onto a channel and returns when the
-// context is cancelled or it gives up. It does no decoding and no writing.
-// Keeping the socket read and the disk write in separate goroutines with a
-// buffered channel between them is deliberate — that channel is where M7's
-// backpressure policy will be decided and measured.
+// A feed is a reader: it pushes frames into a Sink and returns when the context
+// is cancelled or it gives up. It does no decoding and no writing. Keeping the
+// socket read and the disk write in separate goroutines with a queue between
+// them is deliberate — that queue is where the backpressure policy lives, and
+// the Sink interface is what keeps the policy out of the feed. See sink.go.
 package feed
 
 import (
@@ -67,7 +67,7 @@ func (m SeqMode) String() string {
 // Feed is a source of frames.
 //
 // Run pushes frames to out until ctx is cancelled, at which point it returns
-// ctx.Err() or nil. It must not close out; the caller owns the channel. A Feed
+// ctx.Err() or nil. It must not close out; the caller owns the sink. A Feed
 // that handles its own reconnection returns only when it gives up entirely.
 type Feed interface {
 	// Name identifies the feed in logs.
@@ -80,5 +80,5 @@ type Feed interface {
 	SeqMode() SeqMode
 
 	// Run reads until ctx is done.
-	Run(ctx context.Context, out chan<- Frame) error
+	Run(ctx context.Context, out Sink) error
 }

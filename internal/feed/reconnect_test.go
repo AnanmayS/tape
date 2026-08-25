@@ -127,7 +127,7 @@ func TestCoinbaseReconnectsAndResubscribes(t *testing.T) {
 
 	out := make(chan Frame, 256)
 	done := make(chan error, 1)
-	go func() { done <- c.Run(ctx, out) }()
+	go func() { done <- c.Run(ctx, ChanSink(out)) }()
 
 	var reseeds []Frame
 	var data int
@@ -206,7 +206,7 @@ func TestCoinbaseStopsReconnectingOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	out := make(chan Frame, 256)
 	done := make(chan error, 1)
-	go func() { done <- c.Run(ctx, out) }()
+	go func() { done <- c.Run(ctx, ChanSink(out)) }()
 
 	<-out // first reseed
 	cancel()
@@ -233,7 +233,7 @@ func TestCoinbaseRetriesDialFailures(t *testing.T) {
 	defer cancel()
 
 	out := make(chan Frame, 8)
-	err := c.Run(ctx, out)
+	err := c.Run(ctx, ChanSink(out))
 	if err != nil {
 		t.Fatalf("Run should return nil when the context ends, got %v", err)
 	}

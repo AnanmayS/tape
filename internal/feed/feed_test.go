@@ -16,7 +16,7 @@ func drain(t *testing.T, f Feed) []Frame {
 
 	out := make(chan Frame, 256)
 	done := make(chan error, 1)
-	go func() { done <- f.Run(ctx, out); close(out) }()
+	go func() { done <- f.Run(ctx, ChanSink(out)); close(out) }()
 
 	var got []Frame
 	for fr := range out {
@@ -131,7 +131,7 @@ func TestSyntheticStopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	out := make(chan Frame)
 	done := make(chan error, 1)
-	go func() { done <- s.Run(ctx, out) }()
+	go func() { done <- s.Run(ctx, ChanSink(out)) }()
 
 	<-out // the initial reseed
 	cancel()

@@ -83,7 +83,7 @@ func (c *Coinbase) SeqMode() SeqMode { return SeqMonotonic }
 // end; a feed that quit after N failures would hand back a window that looks
 // complete and is not. Every reconnection puts a reseed frame in the stream,
 // so a replayer can see that the book was rebuilt there.
-func (c *Coinbase) Run(ctx context.Context, out chan<- Frame) error {
+func (c *Coinbase) Run(ctx context.Context, out Sink) error {
 	b := newBackoff(backoffBase, backoffMax)
 	reason := "subscribed"
 
@@ -123,7 +123,7 @@ func errText(err error) string {
 
 // session runs exactly one connection: dial, subscribe, read until failure.
 // reason is carried into the reseed frame the subscription emits.
-func (c *Coinbase) session(ctx context.Context, out chan<- Frame, reason string) error {
+func (c *Coinbase) session(ctx context.Context, out Sink, reason string) error {
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 
@@ -155,7 +155,7 @@ func (c *Coinbase) session(ctx context.Context, out chan<- Frame, reason string)
 
 	// The subscription is a fresh book from here. Say so in the stream, not
 	// just in the log, so a replayer knows where the book was rebuilt.
-	if !send(ctx, out, Frame{
+	if !out.Send(ctx, Frame{
 		Kind:   KindReseed,
 		Recv:   time.Now().UTC(),
 		Reason: reason,
@@ -173,7 +173,7 @@ func (c *Coinbase) session(ctx context.Context, out chan<- Frame, reason string)
 			}
 			return fmt.Errorf("feed: read: %w", err)
 		}
-		if !send(ctx, out, Frame{Kind: KindData, Raw: raw, Recv: time.Now().UTC()}) {
+		if !out.Send(ctx, Frame{Kind: KindData, Raw: raw, Recv: time.Now().UTC()}) {
 			return ctx.Err()
 		}
 	}
@@ -183,16 +183,4 @@ type subscribeMsg struct {
 	Type       string   `json:"type"`
 	ProductIDs []string `json:"product_ids"`
 	Channels   []string `json:"channels"`
-}
-
-// send blocks until the frame is queued or ctx is done. Blocking is the current
-// backpressure policy: when the writer falls behind, the reader waits rather
-// than dropping data. M7 revisits this with a measured number.
-func send(ctx context.Context, out chan<- Frame, f Frame) bool {
-	select {
-	case out <- f:
-		return true
-	case <-ctx.Done():
-		return false
-	}
 }

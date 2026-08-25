@@ -308,15 +308,8 @@ func (f *recordedFeed) Name() string          { return "recorded" }
 func (f *recordedFeed) Product() string       { return feed.CoinbaseProduct }
 func (f *recordedFeed) SeqMode() feed.SeqMode { return feed.SeqMonotonic }
 
-func (f *recordedFeed) Run(ctx context.Context, out chan<- feed.Frame) error {
-	send := func(fr feed.Frame) bool {
-		select {
-		case out <- fr:
-			return true
-		case <-ctx.Done():
-			return false
-		}
-	}
+func (f *recordedFeed) Run(ctx context.Context, out feed.Sink) error {
+	send := func(fr feed.Frame) bool { return out.Send(ctx, fr) }
 
 	if len(f.frames) == 0 {
 		return nil
