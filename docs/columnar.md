@@ -235,15 +235,31 @@ produces 2,197,803 bytes of canonical NDJSON and
 digest M3 wrote down and M4 carried through the storage move, unchanged. A
 window with some files in each format produces it too.
 
-## Why raw is still the default
+## Why this is now the default
 
-`tape capture` writes v1 unless told otherwise.
+`tape capture` writes v2 unless told `-format raw`.
 
-Capture is the half of this project that cannot be re-run: a window that was
-never recorded is gone. The columnar writer has now survived live captures, but
-it has not been measured under the load M7 exists to apply, and it holds records
-in memory that the v1 writer would already have handed to the kernel.
+It was the other way around until M7, and for a reason worth keeping written
+down: capture is the half of this project that cannot be re-run, and a format
+that holds records in memory the v1 writer would already have handed to the
+kernel had not met a load. M7 applied one, and the condition attached to raw's
+default was discharged.
 
-M7 measures both under backpressure. If columnar sustains the same rate, it
-becomes the default then — on a number, which is the deal this project makes
-with itself about every other decision too.
+Measured at saturation on an AMD Ryzen 7 3700X, the columnar writer sustains
+**49,800 messages a second** against a live feed that produces 31 to 100 — a
+factor of 1,330. The v1 writer sustains 244,600, and that comparison is the
+wrong one: what decides this is columnar against the exchange, not columnar
+against raw. A four-minute live columnar capture at 31.5 msg/s peaked at a queue
+depth of 15 out of 4,096, with no drops and no gaps.
+
+The cost is a tail rather than a rate. Per record, v1 writes at a p50 of 175 ns
+with a 1.2 ms worst case; v2 at a p50 of 2.6 µs with a 58 ms worst case, and
+that worst case is the one record in four thousand that closes a batch and pays
+for encoding and compressing it. At the live rate a batch fills in about 110
+seconds, so the 58 ms arrives every 110 seconds and the queue grows by two
+frames while it does.
+
+What is still true is the exposure a hard kill carries: a SIGKILL loses the
+batch in flight, up to 4,096 records, where v1 would have lost only the last
+flush. A clean stop — including the SIGTERM ECS sends — loses nothing, and the
+tables in the M7 section of README.md are the rest of the argument.

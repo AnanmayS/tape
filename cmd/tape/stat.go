@@ -22,7 +22,7 @@ import (
 //
 // It is the compression ratio's provenance. The number in the README comes from
 // running this on a real captured window, not from an estimate — and the
-// per-column breakdown is here because "5.8x" without it is a claim rather than
+// per-column breakdown is here because "5.2x" without it is a claim rather than
 // a measurement.
 func runStat(args []string) error {
 	fs := flag.NewFlagSet("stat", flag.ExitOnError)

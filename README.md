@@ -68,13 +68,14 @@ broad one that is half-finished.
 ```
 go build -o tape ./cmd/tape
 ./tape capture -dir data -window 5m
-./tape capture -dir data -format columnar
+./tape capture -dir data -format raw
 ./tape capture -dir data -s3-bucket my-tape-bucket
 ./tape capture -dir data -s3-bucket my-tape-bucket -metrics-namespace Tape
 ./tape verify data/v1/symbol=BTC-USD/date=2026-08-25
 ./tape verify -s3-bucket my-tape-bucket v1/symbol=BTC-USD/date=2026-08-25
 ./tape replay -continue-on-gap data/v1/symbol=BTC-USD/date=2026-08-25 > window.ndjson
 ./tape stat data/v1/symbol=BTC-USD/date=2026-08-25
+./tape bench -repeat 20 data/v1/symbol=BTC-USD/date=2026-08-25
 ```
 
 Ctrl-C stops the capture cleanly and prints a counted session summary. The
@@ -104,8 +105,15 @@ columnar batches, 5.2x smaller, described in [docs/columnar.md](docs/columnar.md
 Replay reads either, per file, so a window can hold both. Files are opened once
 with `O_APPEND` and never reopened.
 
-`capture` writes v1 unless given `-format columnar`; the reasoning for that
-default, and the condition for changing it, is in the M5 results below.
+`capture` writes v2 unless given `-format raw`. M5 left raw the default with one
+condition attached — the columnar writer had not met a load — and M7 measured
+it at 49,800 messages a second against a live feed that produces 31 to 100. The
+number and the reasoning are in the M7 results below.
+
+`bench` pushes a captured window back through the capture path at saturation and
+reports what each backpressure policy costs. It is how the policy was chosen and
+how that choice can be re-checked; it is also the only place the policies that
+were not chosen can still be selected.
 
 With `-s3-bucket`, each file is uploaded as it closes. Local disk stays the
 durable copy: an unreachable bucket costs a re-upload, never a frame. Uploads
@@ -127,16 +135,30 @@ it is where the compression ratio below comes from.
 
 ## Status
 
-M1 through M5 done: WebSocket ingest, sequence-gap detection, reconnect with
-backoff, deterministic replay, S3 storage partitioned by symbol, date and hour,
-and a delta-encoded columnar format measured at 5.2x against the raw feed.
+M1 through M5 and M7 are done: WebSocket ingest, sequence-gap detection,
+reconnect with backoff, deterministic replay, S3 storage partitioned by symbol,
+date and hour, a delta-encoded columnar format measured at 5.2x against the raw
+feed, and a backpressure policy chosen by measuring all three candidates at
+saturation.
 
 M6 is written but not applied. The Terraform, the metrics the ingester
 publishes, the image and the CI are all in the repository and all of them are
 checked as far as they can be checked without an AWS account; nothing has been
-deployed, and the section below says exactly which claims are still unproven.
-M7 (backpressure under load) is next, and is the milestone that turns the open
-question in CLAUDE.md into a number.
+deployed, and the M6 section below says exactly which claims are still unproven.
+
+### The five numbers
+
+These are the deliverables `CLAUDE.md` commits to. Every one comes from running
+the thing; none is estimated. Hardware for the rate-dependent ones: **AMD Ryzen
+7 3700X** (8 cores, 16 threads), 31 GiB RAM, ext4 on NVMe, Go 1.27, Linux.
+
+| | |
+|---|---|
+| **Sustained messages/sec under backpressure** | **49,800/s** columnar, **244,600/s** raw, at saturation under the chosen block policy — 1,330x and 6,540x the live feed's 37.4/s (M7) |
+| **Compression ratio versus raw JSON** | **5.25x** against the frames on a live columnar capture; 5.12x measured against a concurrent raw capture of the same minutes (M5) |
+| **Replay throughput versus wall-clock** | **81,313 events/sec, 2,580x wall-clock** on a live 4-minute columnar window, including canonical NDJSON (M3, M5) |
+| **Gaps detected per capture session** | **0** in each clean session here (6m raw, 4m columnar); **3 gaps of 649, 526 and 3,240 missing sequence numbers** in a session with the connection severed every 25s (M1/M2) |
+| **Determinism** | Two replays of the live window: **7,612,411 bytes both times, `sha256 8f203076…`**. The M3 golden fixture still replays to `sha256 ee957604…` through S3, through the columnar format, and through a mixed-format window |
 
 ### M1 and M2 — capture
 
@@ -305,10 +327,11 @@ frames, or a 30-second span of receive timestamps — so what a session writes i
 a function of the frames that went into it, and a hard kill loses at most that
 much. A clean stop loses nothing.
 
-**Raw is still the default.** Capture is the half of this project that cannot be
-re-run, and the columnar writer has not yet been measured under the load M7
-exists to apply. M7 measures both; if columnar sustains the same rate it becomes
-the default then, on a number.
+**Columnar is now the default.** This section left raw the default with one
+condition attached, and M7 discharged it: the columnar writer sustains 49,800
+messages a second, 1,330 times the live rate, and a four-minute live columnar
+capture at 31.5 msg/s peaked at a queue depth of 15 out of 4,096. The full
+measurement is in M7 below.
 
 The full design note, the codec measurements and the column-by-column reasoning
 are in [docs/columnar.md](docs/columnar.md).
@@ -385,3 +408,140 @@ that matters most, inducing a gap on a live deployment and watching the alarm
 deliver, can only happen after a deploy. Every link in that chain is tested in
 isolation; none of it is tested joined up. [docs/deploy.md](docs/deploy.md)
 keeps the same list.
+
+### M7 — backpressure, decided by measurement
+
+The reader and the writer have always been separate goroutines with a queue
+between them, and what that queue does when it fills was the last open decision
+in `CLAUDE.md`. There were three candidates — block, drop, buffer — and the
+milestone's job was to make it a number rather than a preference.
+
+All three are implemented as one `feed.Sink` with three sends. `tape bench`
+reads a captured window, holds it in memory, and offers it back to `capture.Run`
+through that sink, so the sequence tracking, the gap detection, the rotation and
+the writing under load are the production ones and the socket is the only thing
+substituted. The load below is a **six-minute live BTC-USD capture — 13,459
+messages, 7.7 MiB of frames, 37.4 msg/s, zero gaps — pushed through twenty
+times**, 269,180 messages and 154.1 MiB per run. Each pass advances every
+sequence number past the pass before it and copies the frame it sends, because a
+repeated window that restarted its sequence would be a wall of regression
+records, and frames that all aliased one buffer would let a policy hold a million
+of them for the price of a million pointers — which is exactly the cost one of
+the three is being measured on.
+
+Hardware, since these numbers are machine-dependent: **AMD Ryzen 7 3700X**
+(8 cores, 16 threads), 31 GiB RAM, ext4 on NVMe, Go 1.27, Linux. Runs on tmpfs
+measure memory bandwidth and are not reported.
+
+**At saturation** — the feed offering frames as fast as the sink accepts them,
+median of three runs:
+
+| format | policy | offered/s | written/s | dropped | loss | peak queue | heap | p50 | p99 | p99.9 | max |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| raw | block | 244.6k | 244.6k | 0 | 0 | 4,097 | +10 MiB | 175ns | 1.3µs | 74µs | 1.07ms |
+| raw | drop | 2.24M | 78.7k | 259,711 | 96.5% | 4,096 | +32 MiB | 159ns | 2.6µs | 393µs | 0.91ms |
+| raw | buffer | 248.2k | 248.2k | 0 | 0 | 253,849 | +268 MiB | 159ns | 1.2µs | 74µs | 0.95ms |
+| columnar | block | 49.8k | 49.8k | 0 | 0 | 4,097 | +22 MiB | 2.6µs | 15.4µs | 123µs | 55.7ms |
+| columnar | drop | 740.0k | 14.7k | 263,827 | 98.0% | 4,097 | +26 MiB | 2.6µs | 30.7µs | 12.6ms | 56.3ms |
+| columnar | buffer | 50.8k | 50.8k | 0 | 0 | 267,430 | +323 MiB | 2.6µs | 15.4µs | 106µs | 59.6ms |
+
+That table is not yet a fair comparison and it is worth saying why. The offered
+rate differs by policy — 2.24M/s for drop, 248k for block — because blocking
+throttles the reader and dropping does not, and no exchange offers two million
+messages a second. Comparing throughput across rows of that table would be
+comparing three different experiments.
+
+**The fair comparison pins the offered rate.** Each policy is given the same
+load, twice what the writer can take, so the only thing that varies is what it
+does with the excess:
+
+| format | policy | offered/s | written/s | dropped | loss | peak queue | heap |
+|---|---|---|---|---|---|---|---|
+| columnar | block | 49.6k | 49.6k | 0 | 0 | 4,097 | +23 MiB |
+| columnar | drop | 100.2k | 47.9k | 421,422 | 52.2% | 4,097 | +25 MiB |
+| columnar | buffer | 51.1k | 51.1k | 0 | 0 | 399,034 | +537 MiB |
+| raw | block | 244.6k | 244.6k | 0 | 0 | 4,097 | +19 MiB |
+| raw | drop | 484.7k | 228.5k | 1,067,145 | 52.9% | 4,097 | +17 MiB |
+| raw | buffer | 253.4k | 253.4k | 0 | 0 | 956,193 | +1.34 GiB |
+
+**Drop is not faster, and it loses half the feed.** At twice the writer's
+capacity it wrote 47,900 messages a second against block's 49,600 and discarded
+52.2% of what arrived. The policy exists to protect the writer and it does not:
+the writer was already going as fast as it could, and the reader spinning
+alongside it took CPU rather than giving it. What drop buys is nothing, and what
+it costs is 421,422 frames.
+
+**Buffer is not faster either, and it converts a throughput problem into an OOM.**
+It wrote the same as block and grew the heap by 537 MiB in sixteen seconds on
+the columnar writer, 1.34 GiB in eight on the raw one — the excess arrival rate
+times the size of a frame, which is what an unbounded queue is. A burst it would
+absorb; a sustained overload it cannot, and the end of that is a SIGKILL, which
+loses the batch the writer had not flushed. The policy that discards nothing has
+the failure that discards the most, and it leaves no record of it.
+
+**Block's worst case is the only one already covered by invariant 2.** A reader
+that stops draining its socket eventually has the exchange disconnect it, and
+that is a path this project has handled since M2: reconnect, reseed record, gap
+record, window marked untrustworthy. Nothing new has to be built and nothing can
+be lost silently. **Block is the default, and `tape capture` has no policy
+flag.**
+
+**Every drop is a gap record.** A drop policy that merely counted what it threw
+away would produce a window missing messages that reads as complete, which is
+invariant 2 exactly — so it would not have been a legal candidate to measure. A
+run of discarded frames is written into the stream as a gap record carrying the
+count, placed ahead of the frame that resumed, and counted as a gap everywhere a
+gap counts: the session summary, the `GapsDetected` metric, and the CloudWatch
+alarm whose threshold is zero. On a monotonic feed nothing else could reveal it,
+because there a skipped sequence number proves nothing. The 421,422 drops above
+are covered by 1,752 gap records; the 1,067,145 by 34,367. A test asserts the
+accounting under all three policies: every frame a session accepted is on disk
+or inside a gap record's count.
+
+**The queue's approach to the edge,** replaying the same window at multiples of
+its own wall clock under the block policy — peak queue depth of 4,096:
+
+| offered msg/s | raw | columnar |
+|---|---|---|
+| 3.7k | 153 | 274 |
+| 11.2k | 174 | 548 |
+| 22.4k | 222 | 1,551 |
+| 33.7k | 238 | 1,767 |
+| 44.9k | 272 | 3,311 |
+| 56.1k requested | 379 | **4,097 — pinned; only 49.7k delivered** |
+
+Those depths include the harness's own pacing burstiness, which is why the
+honest low-rate number is the live one: **a four-minute live columnar capture at
+31.5 msg/s peaked at a queue depth of 15 out of 4,096**, with zero drops and
+zero gaps. Earlier live raw sessions: 37 of 4,096 at 37.4 msg/s, 32 at 31.0, 9
+at 75.9. The feed is three orders of magnitude from the edge, which is why the
+decision is about which failure is survivable there and not about which policy
+is quickest.
+
+**Write latency is where the columnar format's cost shows up.** Per record, raw
+writes at a p50 of 175 ns and a worst case of 1.2 ms; columnar at a p50 of
+2.6 µs and a worst case of 58 ms. That worst case is one record in four
+thousand — the one that closes a batch and pays for encoding and compressing it.
+At the live rate a batch of 4,096 rows takes about 110 seconds to fill, so that
+58 ms lands once every 110 seconds and the queue grows by two frames while it
+does. The live capture's own histogram says the same thing from the other side:
+`p50 4.61µs p90 7.68µs p99 20.48µs p99.9 3.93ms max 53.33ms`.
+
+**Columnar became the default here.** M5 left it optional pending exactly this
+measurement. It sustains 49,800 messages a second — 1,330x the live rate — stores
+the same records 5.25x smaller, and replays byte-identically; raw is 4.9x faster
+and that is the wrong comparison, because what matters is columnar against the
+exchange rather than columnar against raw. The four-minute live columnar
+capture — 7,556 messages, 1,039,671 bytes, two files, zero gaps — replays twice
+to **7,612,411 bytes and `sha256
+8f203076e909f30d9791a4a88f62bbeb11150ff874fc7b7d4e4dd05df67720fd`** both times,
+at 81,313 events/sec and 2,580x wall-clock.
+
+**What is instrumented, and where it came from.** Queue depth was already a
+metric; M7 added the drop counter and a bucketed write-latency histogram with
+3 bits of mantissa — 512 buckets, no allocation, always on, because a number
+that only exists when a flag was passed is a number nobody has when they need
+it. The queue-depth-over-time series `tape bench -v` prints comes from the same
+`metrics.Collector` the production build publishes to CloudWatch, so the graph
+the harness draws is the graph an operator would see. No sixth CloudWatch metric
+was added: drops are gaps, and `GapsDetected` already carries them.

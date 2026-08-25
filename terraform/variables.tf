@@ -128,13 +128,14 @@ variable "capture_window" {
 
 variable "capture_format" {
   description = <<-EOT
-    Value for `tape capture -format`: "raw" (v1 record log) or "columnar" (v2,
-    5.1x smaller). raw is the binary's default until M7 measures the columnar
-    writer under load; see the M5 section of README.md.
+    Value for `tape capture -format`: "columnar" (v2, 5.2x smaller) or "raw"
+    (v1 record log). columnar is the binary's default since M7 measured it at
+    49,800 messages a second, 1,330 times the live rate; see the M7 section of
+    README.md.
   EOT
 
   type    = string
-  default = "raw"
+  default = "columnar"
 
   validation {
     condition     = contains(["raw", "columnar"], var.capture_format)
