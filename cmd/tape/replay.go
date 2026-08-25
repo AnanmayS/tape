@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -22,13 +23,20 @@ func runReplay(args []string) error {
 	reorder := fs.Int("reorder", replay.DefaultReorderWindow,
 		"records held in the reorder buffer while sorting")
 	quiet := fs.Bool("quiet", false, "do not print the summary on stderr")
+	var store storeFlags
+	store.register(fs, "replay from")
 
 	fs.Usage = func() {
 		fmt.Fprint(fs.Output(),
 			"usage: tape replay [flags] <window>\n\n"+
-				"Replays a window — a directory of .tape files, or one file — to stdout as\n"+
-				"canonical NDJSON, one object per record, in the fixed total order documented\n"+
-				"in docs/replay.md. The same window always produces the same bytes.\n\n"+
+				"Replays a window to stdout as canonical NDJSON, one object per record, in the\n"+
+				"fixed total order documented in docs/replay.md. The same window always\n"+
+				"produces the same bytes, and a window replayed from a bucket produces the\n"+
+				"same bytes as the same window replayed from disk.\n\n"+
+				"A window is a local directory of .tape files, or one .tape file. With\n"+
+				"-s3-bucket it is instead a key prefix, e.g.\n"+
+				"  v1/symbol=BTC-USD/date=2026-08-25\n"+
+				"and objects are streamed as they are read rather than downloaded first.\n\n"+
 				"Replay stops at a gap or a reconnect unless -continue-on-gap is given; either\n"+
 				"way the gap and reseed records are part of the output.\n\nflags:\n")
 		fs.PrintDefaults()
@@ -45,7 +53,7 @@ func runReplay(args []string) error {
 	if *continueOnGap {
 		opts = append(opts, replay.WithContinueOnGap())
 	}
-	r, err := replay.Open(fs.Arg(0), opts...)
+	r, err := openWindow(context.Background(), &store, fs.Arg(0), opts...)
 	if err != nil {
 		return err
 	}
@@ -84,6 +92,8 @@ func runVerify(args []string) error {
 	fs := flag.NewFlagSet("verify", flag.ExitOnError)
 	reorder := fs.Int("reorder", replay.DefaultReorderWindow,
 		"records held in the reorder buffer while sorting")
+	var store storeFlags
+	store.register(fs, "verify from")
 
 	fs.Usage = func() {
 		fmt.Fprint(fs.Output(),
@@ -91,6 +101,9 @@ func runVerify(args []string) error {
 				"Reads a window end to end without writing it out, and reports what is in it:\n"+
 				"counts, the SHA-256 of its canonical NDJSON, every gap and reconnect, and\n"+
 				"replay throughput against the wall-clock time the window took to capture.\n\n"+
+				"The window is a local path, or a key prefix when -s3-bucket is given. The\n"+
+				"digest is the same either way, which is how a stored copy is checked against\n"+
+				"the local one it came from.\n\n"+
 				"It exits non-zero if the window is discontinuous. A window with a gap in it\n"+
 				"is untrustworthy — the public feed offers no backfill — and a verifier that\n"+
 				"returned success on one would be worse than no verifier.\n\nflags:\n")
@@ -106,7 +119,8 @@ func runVerify(args []string) error {
 
 	// Verification reads the whole window on purpose: stopping at the first
 	// discontinuity would report one gap and hide the rest.
-	r, err := replay.Open(fs.Arg(0), replay.WithReorderWindow(*reorder), replay.WithContinueOnGap())
+	r, err := openWindow(context.Background(), &store, fs.Arg(0),
+		replay.WithReorderWindow(*reorder), replay.WithContinueOnGap())
 	if err != nil {
 		return err
 	}
@@ -131,6 +145,20 @@ func runVerify(args []string) error {
 			n, plural(n, "y", "ies"))
 	}
 	return nil
+}
+
+// openWindow opens the window named by arg: a key prefix in the bucket if one
+// was named, a local path otherwise. The two produce identical output, so this
+// is the only place either command has to know which it got.
+func openWindow(ctx context.Context, store *storeFlags, arg string, opts ...replay.Option) (*replay.Reader, error) {
+	if !store.set() {
+		return replay.Open(arg, opts...)
+	}
+	st, err := store.store(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return replay.OpenStore(ctx, st, arg, opts...)
 }
 
 // drain pumps every record through fn, returning nil at a clean end of window.

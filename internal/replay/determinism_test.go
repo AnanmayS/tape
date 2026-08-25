@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"path"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/AnanmayS/tape/internal/storage"
@@ -121,6 +122,14 @@ func TestStoreWindowPrefix(t *testing.T) {
 	}
 	if _, again := replayCanonicalStore(t, st, prefix); again != prefixedDigest {
 		t.Errorf("two replays under a prefix disagree: %s vs %s", prefixedDigest, again)
+	}
+
+	// A prefix typed without its trailing slash is the same window. It is what
+	// a person types on a command line, and it must not silently name a
+	// different thing.
+	if _, bare := replayCanonicalStore(t, st, strings.TrimSuffix(prefix, "/")); bare != prefixedDigest {
+		t.Errorf("the same prefix with and without its trailing slash replayed differently:\n %s\n %s",
+			prefixedDigest, bare)
 	}
 	t.Logf("window under %q replays to sha256 %s", prefix, prefixedDigest)
 }

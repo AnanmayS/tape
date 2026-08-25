@@ -17,14 +17,23 @@ import (
 
 	"github.com/AnanmayS/tape/internal/event"
 	"github.com/AnanmayS/tape/internal/feed"
+	"github.com/AnanmayS/tape/internal/storage"
 	"github.com/AnanmayS/tape/internal/tapefile"
 )
 
 // Config configures a capture session.
 type Config struct {
-	// Root is the data directory. Files land at
-	// Root/{symbol}/{date}/{window start}.tape.
+	// Root is the local data directory. Files land at Root plus the storage
+	// key: Root/v1/symbol={symbol}/date={date}/hour={hour}/{start}.tape.
 	Root string
+
+	// Store, if set, receives every file as it closes. Local disk stays the
+	// durable copy either way — an upload is a copy of a file that is already
+	// safely written, never the only place a window lives.
+	Store storage.Store
+
+	// Upload configures the uploader used when Store is set.
+	Upload storage.UploadConfig
 
 	// Window is the wall-clock rotation window.
 	Window time.Duration
@@ -94,6 +103,14 @@ type Summary struct {
 	MaxQueueDepth int
 
 	Files []string
+
+	// Store names where files were uploaded, or "" if nowhere.
+	Store string
+
+	// Upload counts what the uploader did. A session that uploaded nothing
+	// because the bucket was unreachable is a session that still captured
+	// everything, and these are the numbers that say so.
+	Upload storage.UploadStats
 }
 
 // Duration is the wall-clock length of the session.
@@ -110,6 +127,15 @@ func (s Summary) MessagesPerSecond() float64 {
 
 // LogAttrs renders the summary for a structured logger.
 func (s Summary) LogAttrs() []any {
+	attrs := s.captureAttrs()
+	if s.Store != "" {
+		attrs = append(attrs, "store", s.Store)
+		attrs = append(attrs, s.Upload.LogAttrs()...)
+	}
+	return attrs
+}
+
+func (s Summary) captureAttrs() []any {
 	return []any{
 		"feed", s.Feed,
 		"product", s.Product,
@@ -136,8 +162,28 @@ func Run(ctx context.Context, f feed.Feed, cfg Config) (Summary, error) {
 	cfg.withDefaults()
 	log := cfg.Log.With("feed", f.Name(), "product", f.Product())
 
-	w, err := tapefile.NewWriter(cfg.Root, f.Product(), cfg.Window)
+	// The uploader is wired in through the writer's closed-file hook, so a
+	// window is offered to the store at exactly the moment it stops being
+	// written to and not one record earlier. Add never blocks, so the hook
+	// firing on the writer goroutine costs the capture path nothing.
+	var up *storage.Uploader
+	var opts []tapefile.Option
+	if cfg.Store != nil {
+		ucfg := cfg.Upload
+		if ucfg.Log == nil {
+			ucfg.Log = log
+		}
+		up = storage.NewUploader(cfg.Store, ucfg)
+		opts = append(opts, tapefile.OnFileClosed(func(fl tapefile.File) {
+			up.Add(fl.Path, fl.Key)
+		}))
+	}
+
+	w, err := tapefile.NewWriter(cfg.Root, f.Product(), cfg.Window, opts...)
 	if err != nil {
+		if up != nil {
+			up.Close()
+		}
 		return Summary{}, err
 	}
 
@@ -145,6 +191,9 @@ func Run(ctx context.Context, f feed.Feed, cfg Config) (Summary, error) {
 		Feed:    f.Name(),
 		Product: f.Product(),
 		Started: time.Now().UTC(),
+	}
+	if cfg.Store != nil {
+		sum.Store = cfg.Store.String()
 	}
 	sink := &sink{w: w, seq: newSeqTracker(f.SeqMode()), log: log, sum: &sum}
 
@@ -189,8 +238,15 @@ drain:
 		}
 	}
 
+	// Close before the uploader: closing the writer is what hands the last
+	// file over, and a drain started before that would miss it.
 	if cerr := w.Close(); writeErr == nil {
 		writeErr = cerr
+	}
+	var uploadErr error
+	if up != nil {
+		uploadErr = up.Close()
+		sum.Upload = up.Stats()
 	}
 
 	// Let the reader notice it is done, then collect its result rather than
@@ -211,7 +267,10 @@ drain:
 	st := w.Stats()
 	sum.Records, sum.Bytes, sum.Rotations, sum.Files = st.Records, st.Bytes, st.Rotations, st.Files
 
-	return sum, errors.Join(writeErr, feedErr)
+	// An upload that did not finish is reported but does not make a capture a
+	// failure: every byte is on local disk, complete, under the key the object
+	// would have had. That is a re-run, not data loss.
+	return sum, errors.Join(writeErr, feedErr, uploadErr)
 }
 
 // readerStopTimeout bounds how long shutdown waits for the reader goroutine.
