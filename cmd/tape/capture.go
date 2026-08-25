@@ -28,6 +28,8 @@ func runCapture(args []string) error {
 	logFormat := fs.String("log", "text", "log format: text or json")
 	var store storeFlags
 	store.register(fs, "upload each closed file to")
+	var met metricsFlags
+	met.register(fs)
 
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(),
@@ -45,6 +47,10 @@ func runCapture(args []string) error {
 				"With -s3-bucket, each file is uploaded as it closes, under that same key.\n"+
 				"Local disk stays the durable copy: an unreachable bucket costs a re-upload,\n"+
 				"never a frame, and the upload is logged loudly rather than failing capture.\n\n"+
+				"With -metrics-namespace, five numbers a minute go to CloudWatch: messages,\n"+
+				"message rate, gaps, ingest lag and peak queue depth. It is off unless asked\n"+
+				"for, so a local capture never needs AWS, and a publish that fails is a log\n"+
+				"line rather than a lost frame.\n\n"+
 				"flags:\n", feed.CoinbaseURL, feed.CoinbaseProduct,
 			[]string{feed.ChannelLevel2Batch, feed.ChannelMatches})
 		fs.PrintDefaults()
@@ -59,6 +65,14 @@ func runCapture(args []string) error {
 	}
 
 	st, err := store.store(context.Background())
+	if err != nil {
+		return err
+	}
+
+	// The publisher is built before the signal context and closed after the
+	// session, so the final partial interval is published on the way out
+	// rather than dropped with the process.
+	rec, closeMetrics, err := met.recorder(context.Background(), feed.CoinbaseProduct, log)
 	if err != nil {
 		return err
 	}
@@ -81,6 +95,7 @@ func runCapture(args []string) error {
 		"window", window.String(),
 		"buffer", *buffer,
 		"duration", durationLabel(*duration),
+		"metrics", met.label(),
 		"seq_mode", f.SeqMode().String())
 
 	sum, runErr := capture.Run(ctx, f, capture.Config{
@@ -91,10 +106,15 @@ func runCapture(args []string) error {
 		Buffer:        *buffer,
 		FlushInterval: *flushEvery,
 		Log:           log,
+		Metrics:       rec,
 	})
 
+	// Flush the last interval before reporting, so the numbers in the log and
+	// the numbers on the graph describe the same session.
+	metStats := closeMetrics()
+
 	// The summary is worth printing even when the session died.
-	log.Info("session summary", sum.LogAttrs()...)
+	log.Info("session summary", append(sum.LogAttrs(), metStats...)...)
 	for _, p := range sum.Files {
 		log.Info("wrote file", "path", p)
 	}

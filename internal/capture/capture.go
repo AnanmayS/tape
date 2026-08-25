@@ -18,6 +18,7 @@ import (
 	"github.com/AnanmayS/tape/internal/colfmt"
 	"github.com/AnanmayS/tape/internal/event"
 	"github.com/AnanmayS/tape/internal/feed"
+	"github.com/AnanmayS/tape/internal/metrics"
 	"github.com/AnanmayS/tape/internal/storage"
 	"github.com/AnanmayS/tape/internal/tapefile"
 )
@@ -66,6 +67,11 @@ type Config struct {
 	// Log receives structured progress. Required in practice; nil falls back
 	// to the default logger.
 	Log *slog.Logger
+
+	// Metrics receives the same counts the summary reports, one interval at a
+	// time. nil means metrics.Nop: a session that was not told where to publish
+	// does not publish, and reaches no network to find that out.
+	Metrics metrics.Recorder
 }
 
 func (c *Config) withDefaults() {
@@ -83,6 +89,9 @@ func (c *Config) withDefaults() {
 	}
 	if c.Log == nil {
 		c.Log = slog.Default()
+	}
+	if c.Metrics == nil {
+		c.Metrics = metrics.Nop{}
 	}
 }
 
@@ -219,7 +228,7 @@ func Run(ctx context.Context, f feed.Feed, cfg Config) (Summary, error) {
 	if cfg.Store != nil {
 		sum.Store = cfg.Store.String()
 	}
-	sink := &sink{w: w, seq: newSeqTracker(f.SeqMode()), log: log, sum: &sum}
+	sink := &sink{w: w, seq: newSeqTracker(f.SeqMode()), log: log, sum: &sum, met: cfg.Metrics}
 
 	// If the writer stops first, the reader must be told, or it will block
 	// forever on a send nobody is receiving.
@@ -247,9 +256,11 @@ drain:
 			if !ok {
 				break drain
 			}
-			if d := len(frames) + 1; d > sum.MaxQueueDepth {
+			d := len(frames) + 1
+			if d > sum.MaxQueueDepth {
 				sum.MaxQueueDepth = d
 			}
+			cfg.Metrics.QueueDepth(d)
 			if err := sink.handle(fr); err != nil {
 				writeErr = err
 				break drain
@@ -332,6 +343,7 @@ type sink struct {
 	seq *seqTracker
 	log *slog.Logger
 	sum *Summary
+	met metrics.Recorder
 }
 
 // handle writes one frame and updates counters.
@@ -354,6 +366,11 @@ func (s *sink) handle(fr feed.Frame) error {
 
 	case feed.KindData:
 		s.sum.Messages++
+		s.met.Message()
+
+		// Kept past the decode so the lag can be measured against the moment
+		// the record is actually written rather than the moment it was parsed.
+		var exchangeTime time.Time
 
 		e, err := event.Decode(fr.Raw, fr.Recv)
 		if err != nil {
@@ -362,6 +379,7 @@ func (s *sink) handle(fr feed.Frame) error {
 			s.sum.DecodeErrors++
 			s.log.Warn("undecodable frame", "err", err, "bytes", len(fr.Raw))
 		} else {
+			exchangeTime = e.ExchangeTime
 			if e.IsError() {
 				s.sum.ExchangeErrors++
 				s.log.Error("exchange error frame", "detail", event.ErrorText(fr.Raw))
@@ -376,6 +394,17 @@ func (s *sink) handle(fr feed.Frame) error {
 		if err := s.w.WriteMessage(tapefile.Message{Recv: fr.Recv, Raw: fr.Raw}); err != nil {
 			return err
 		}
+
+		// Ingest lag is measured to the write and not to the socket read, so
+		// that time spent waiting in the reader-to-writer channel is inside the
+		// number rather than hidden behind it. That wait is exactly what grows
+		// when the feed outruns the writer, which is the thing this metric is
+		// for. Frames with no exchange timestamp — snapshots, control messages —
+		// contribute nothing rather than a zero.
+		if !exchangeTime.IsZero() {
+			s.met.Lag(time.Now().UTC().Sub(exchangeTime))
+		}
+
 		if s.sum.Messages%progressEvery == 0 {
 			st := s.w.Stats()
 			s.log.Info("progress",
@@ -409,6 +438,7 @@ func (s *sink) checkSequence(e event.Event, at time.Time) error {
 	}
 
 	s.sum.Gaps++
+	s.met.Gap()
 	s.log.Warn("sequence gap",
 		"kind", a.Kind.String(),
 		"expected", a.Expected,

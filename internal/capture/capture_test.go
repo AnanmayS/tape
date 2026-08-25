@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/AnanmayS/tape/internal/feed"
+	"github.com/AnanmayS/tape/internal/metrics"
 	"github.com/AnanmayS/tape/internal/tapefile"
 )
 
@@ -247,7 +248,7 @@ func TestUndecodableFramesAreStillWritten(t *testing.T) {
 		t.Fatal(err)
 	}
 	sum := Summary{}
-	s := &sink{w: w, seq: newSeqTracker(feed.SeqContiguous), log: quietLogger(), sum: &sum}
+	s := &sink{w: w, seq: newSeqTracker(feed.SeqContiguous), log: quietLogger(), sum: &sum, met: metrics.Nop{}}
 	fr := feed.Frame{Kind: feed.KindData, Raw: []byte(`{"type":`), Recv: time.Now().UTC()}
 	if err := s.handle(fr); err != nil {
 		t.Fatalf("handle: %v", err)
