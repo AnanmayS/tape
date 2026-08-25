@@ -1,4 +1,4 @@
-// Command tape captures and (from M3) replays market data.
+// Command tape captures and replays market data.
 package main
 
 import (
@@ -9,10 +9,13 @@ import (
 const usage = `tape — market data capture and deterministic replay
 
 usage:
-  tape capture [flags]    capture the live feed to local tape files
-  tape help               show this message
+  tape capture [flags]            capture the live feed to local tape files
+  tape replay [flags] <window>    replay a window to stdout as canonical NDJSON
+  tape verify [flags] <window>    read a window and report what is in it
+  tape help                       show this message
 
-run "tape capture -h" for capture flags
+a window is a directory of .tape files, or a single .tape file.
+run "tape <subcommand> -h" for its flags
 `
 
 func main() {
@@ -25,6 +28,10 @@ func main() {
 	switch os.Args[1] {
 	case "capture":
 		err = runCapture(os.Args[2:])
+	case "replay":
+		err = runReplay(os.Args[2:])
+	case "verify":
+		err = runVerify(os.Args[2:])
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return

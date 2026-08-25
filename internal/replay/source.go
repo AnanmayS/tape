@@ -89,8 +89,6 @@ type source struct {
 	// seenMessage records whether any message has been read yet, which is what
 	// distinguishes the reseed that opens a window from one that breaks it.
 	seenMessage bool
-
-	bytes int64
 }
 
 func newSource(root string) (*source, error) {
@@ -101,40 +99,43 @@ func newSource(root string) (*source, error) {
 	return &source{root: base, files: files, idx: -1}, nil
 }
 
-// next returns the next record in arrival order with its key. ok is false at
-// the end of the window.
-func (s *source) next() (rec Record, key orderKey, ok bool, err error) {
+// next returns the next record in arrival order, with its ordering key and its
+// stored size. ok is false at the end of the window.
+func (s *source) next() (p pending, ok bool, err error) {
 	for {
 		if s.rd == nil {
 			if err := s.openNext(); err != nil {
-				return Record{}, orderKey{}, false, err
+				return pending{}, false, err
 			}
 			if s.rd == nil {
-				return Record{}, orderKey{}, false, nil
+				return pending{}, false, nil
 			}
 		}
 
 		t, payload, err := s.rd.Next()
 		if err == io.EOF {
 			if cerr := s.rd.Close(); cerr != nil {
-				return Record{}, orderKey{}, false, cerr
+				return pending{}, false, cerr
 			}
 			s.rd = nil
 			continue
 		}
 		if err != nil {
-			return Record{}, orderKey{}, false, fmt.Errorf("%s: record %d: %w", s.files[s.idx], s.rec, err)
+			return pending{}, false, fmt.Errorf("%s: record %d: %w", s.files[s.idx], s.rec, err)
 		}
 
 		ordinal := s.rec
 		s.rec++
-		s.bytes += int64(len(payload)) + recordOverhead
 
 		rec, err := s.decode(t, payload, ordinal)
 		if err != nil {
-			return Record{}, orderKey{}, false, err
+			return pending{}, false, err
 		}
-		return rec, s.keyFor(rec), true, nil
+		return pending{
+			rec:  rec,
+			key:  s.keyFor(rec),
+			size: int64(len(payload)) + recordOverhead,
+		}, true, nil
 	}
 }
 

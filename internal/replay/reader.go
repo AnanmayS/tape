@@ -109,9 +109,10 @@ type DiscontinuityError struct {
 	D Discontinuity
 }
 
-func (e *DiscontinuityError) Error() string {
-	return e.D.String() + " (pass WithContinueOnGap to read past it)"
-}
+// Error deliberately says only what happened. The way past a discontinuity is
+// spelled differently by the library and by the command line, so each names its
+// own remedy rather than this text naming one of them.
+func (e *DiscontinuityError) Error() string { return e.D.String() }
 
 func (e *DiscontinuityError) Unwrap() error { return ErrDiscontinuity }
 
@@ -141,9 +142,10 @@ type Stats struct {
 	Gaps     int64
 	Reseeds  int64
 
-	// Bytes is the stored size of the records read: payloads plus the per-record
-	// type and length prefix. It excludes each file's 8-byte header, so it is
-	// the capture writer's byte count less 8 per file.
+	// Bytes is the stored size of the records delivered: payloads plus the
+	// per-record type and length prefix. It excludes each file's 8-byte header,
+	// so a complete replay reports the capture writer's byte count less 8 per
+	// file. A replay stopped at a gap reports only what it handed over.
 	Bytes int64
 
 	// FirstTime and LastTime bound the window on the local receive clock. Their
@@ -242,7 +244,7 @@ func (r *Reader) Next() (Record, error) {
 	rec := p.rec
 	rec.Index = r.emitted
 	r.emitted++
-	r.count(rec)
+	r.count(rec, p.size)
 
 	if d, ok := discontinuityOf(rec); ok {
 		r.disc = append(r.disc, d)
@@ -258,20 +260,21 @@ func (r *Reader) Next() (Record, error) {
 // records alone.
 func (r *Reader) fill() error {
 	for len(r.buf) < r.cfg.reorder {
-		rec, key, ok, err := r.src.next()
+		p, ok, err := r.src.next()
 		if err != nil {
 			return err
 		}
 		if !ok {
 			return nil
 		}
-		heap.Push(&r.buf, pending{rec: rec, key: key})
+		heap.Push(&r.buf, p)
 	}
 	return nil
 }
 
-func (r *Reader) count(rec Record) {
+func (r *Reader) count(rec Record, size int64) {
 	r.stats.Records++
+	r.stats.Bytes += size
 	switch rec.Kind {
 	case KindMessage:
 		r.stats.Messages++
@@ -280,7 +283,6 @@ func (r *Reader) count(rec Record) {
 	case KindReseed:
 		r.stats.Reseeds++
 	}
-	r.stats.Bytes = r.src.bytes
 	if t := rec.Time(); !t.IsZero() {
 		if r.stats.FirstTime.IsZero() || t.Before(r.stats.FirstTime) {
 			r.stats.FirstTime = t
@@ -324,10 +326,12 @@ func discontinuityOf(rec Record) (Discontinuity, bool) {
 	}
 }
 
-// pending is a record waiting in the reorder buffer.
+// pending is a record on its way through the reorder buffer: the record, the
+// key it sorts by, and the number of bytes it occupied on disk.
 type pending struct {
-	rec Record
-	key orderKey
+	rec  Record
+	key  orderKey
+	size int64
 }
 
 // pendingHeap is a min-heap on the ordering key. The key is a strict total

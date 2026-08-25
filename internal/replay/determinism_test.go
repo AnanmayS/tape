@@ -119,14 +119,14 @@ func sortWholeWindow(t *testing.T, root string, seed uint64) string {
 
 	var all []pending
 	for {
-		rec, key, ok, err := src.next()
+		p, ok, err := src.next()
 		if err != nil {
 			t.Fatalf("source.next: %v", err)
 		}
 		if !ok {
 			break
 		}
-		all = append(all, pending{rec: rec, key: key})
+		all = append(all, p)
 	}
 
 	rng := rand.New(rand.NewPCG(seed, seed*2+1))
