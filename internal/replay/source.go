@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/AnanmayS/tape/internal/colfmt"
 	"github.com/AnanmayS/tape/internal/event"
 	"github.com/AnanmayS/tape/internal/storage"
 	"github.com/AnanmayS/tape/internal/tapefile"
@@ -77,7 +78,7 @@ type source struct {
 	files  []string
 
 	idx int // index into files of the open file, or len(files) when done
-	rd  *tapefile.Reader
+	rd  tapefile.Records
 	rec int64 // ordinal of the next record in the open file
 
 	// base is the ordering content of the last record that carried ordering
@@ -257,6 +258,11 @@ func (s *source) keyFor(rec Record) orderKey {
 // openNext streams the next object in the window. It is a stream, never a
 // download: a day of BTC-USD is gigabytes and a replay must not need room for
 // it, so the object is read through the same bounded buffer a local file is.
+//
+// The object's format is decided by its own version byte, per file, so a window
+// half captured before the columnar format existed and half after replays as
+// one window. Nothing below this line knows which format it got: both readers
+// hand back the same records.
 func (s *source) openNext() error {
 	s.idx++
 	if s.idx >= len(s.files) {
@@ -267,7 +273,7 @@ func (s *source) openNext() error {
 	if err != nil {
 		return err
 	}
-	rd, err := tapefile.OpenReader(rc)
+	rd, err := colfmt.OpenRecords(rc)
 	if err != nil {
 		return fmt.Errorf("%s: %w", key, err)
 	}

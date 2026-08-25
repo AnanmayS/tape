@@ -77,13 +77,22 @@ const fixtureDir = "testdata/window"
 // returns its root.
 func fixtureWindow(t testing.TB) string {
 	t.Helper()
+	return materialize(t, fixtureDir)
+}
+
+// materialize gunzips a committed fixture directory into a temp directory,
+// keeping its layout, and returns the root. Fixtures are stored compressed
+// because the frames in them are real and therefore large; nothing about a
+// replay changes, since what lands on disk is the bytes capture wrote.
+func materialize(t testing.TB, dir string) string {
+	t.Helper()
 	root := t.TempDir()
 	var n int
-	err := filepath.WalkDir(fixtureDir, func(p string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".tape.gz") {
 			return err
 		}
-		rel, err := filepath.Rel(fixtureDir, p)
+		rel, err := filepath.Rel(dir, p)
 		if err != nil {
 			return err
 		}
@@ -101,7 +110,7 @@ func fixtureWindow(t testing.TB) string {
 		t.Fatalf("materialize fixture: %v", err)
 	}
 	if n == 0 {
-		t.Fatalf("no %s/**/*.tape.gz found; regenerate with -fixture.src", fixtureDir)
+		t.Fatalf("no %s/**/*.tape.gz found; regenerate with -fixture.src", dir)
 	}
 	return root
 }
