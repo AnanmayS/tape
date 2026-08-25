@@ -18,7 +18,7 @@ Two designs were on the table.
 columns, keep every raw frame verbatim in a column of its own, compress both.
 
 **B — columns only.** Store the structured fields and rebuild each frame from
-them on read. Roughly twice the ratio, since the frames are 94% of the file.
+them on read. Roughly twice the ratio, since the frames are 91% of the file.
 
 This is A, and the reason is not conservatism. Rebuilding a Coinbase frame
 byte-exactly means reproducing its field order, its full key set — `trade_id`,
@@ -35,7 +35,7 @@ frames, exactly as it does for a v1 file — the v2 reader hands the layer above
 it byte-identical v1 payloads, and everything columnar stops there. The columns
 buy scans: which batches carry a gap, what time range a file covers, where a
 sequence range lives, all without inflating a megabyte of JSON. On a live
-window they cost **6.4% of the file**.
+window they cost **8.7% of the file**.
 
 ## Layout
 
@@ -165,7 +165,8 @@ consequences, both wanted:
   same way a replay's bytes are. Nothing stored depends on when a ticker fired.
 - `tape stat` on a v1 window computes what capturing it columnar *would* have
   produced. Checked against two concurrent live captures of the same feed:
-  949,523 bytes computed, 949,802 actually written, 0.03% apart.
+  1,002,748 bytes computed, 1,003,688 actually written for eighteen more
+  records, 0.09% apart.
 
 What it costs: a hard kill loses the pending batch, at most 4096 records, 4 MiB,
 or 30 seconds of feed. SIGINT and an ECS task stop both arrive as a clean
@@ -173,45 +174,48 @@ shutdown, which flushes it. `Flush` still pushes everything already encoded.
 
 ## Results
 
-**Live, three minutes of BTC-USD, 6,384 records.** Two captures ran
+**Live, three minutes of BTC-USD, 9,189 records.** Two captures ran
 concurrently against the same feed, one per format, so the comparison is over
 the same market rather than over two different minutes.
 
 | | |
 |---|---|
-| Raw frames (what NDJSON would store) | 4,896,303 bytes |
-| v1 tape files | 4,979,337 bytes |
-| v2 columnar | 949,523 bytes |
-| **Ratio** | **5.16x against the frames, 5.24x against v1** |
+| Raw frames (what NDJSON would store) | 5,130,188 bytes |
+| v1 tape files | 5,249,687 bytes |
+| v2 columnar | 1,002,748 bytes |
+| **Ratio** | **5.12x against the frames, 5.24x against v1** |
 
 The columnar figure is what `tape stat` computed for those exact records. The
-concurrent columnar capture wrote 949,802 bytes for its own 6,394 — the same
+concurrent columnar capture wrote 1,003,688 bytes for its own 9,207 — the same
 answer from the other direction.
 
 Per column, as a share of the columnar file:
 
 | column | encoded | raw | share | ratio |
 |---|---|---|---|---|
-| frames | 888,255 | 4,909,013 | 93.5% | 5.53x |
-| recv | 22,935 | 23,867 | 2.4% | 1.04x |
-| exchange | 21,004 | 23,006 | 2.2% | 1.10x |
-| size | 4,604 | 5,768 | 0.5% | 1.25x |
-| sequence | 3,581 | 4,246 | 0.4% | 1.19x |
-| price | 2,007 | 4,331 | 0.2% | 2.16x |
-| type | 1,312 | 6,531 | 0.1% | 4.98x |
-| presence bitsets (6) | 4,052 | 4,806 | 0.4% | 1.19x |
-| scale bytes (2) | 774 | 6,714 | 0.1% | 8.67x |
-| kind | 77 | 6,384 | 0.0% | 82.91x |
+| frames | 914,906 | 5,148,505 | 91.2% | 5.63x |
+| recv | 30,904 | 32,399 | 3.1% | 1.05x |
+| exchange | 29,377 | 32,760 | 2.9% | 1.12x |
+| size | 11,947 | 14,179 | 1.2% | 1.19x |
+| sequence | 4,820 | 6,801 | 0.5% | 1.41x |
+| price | 1,676 | 7,123 | 0.2% | 4.25x |
+| type | 1,494 | 9,336 | 0.1% | 6.25x |
+| presence bitsets (6) | 5,458 | 6,918 | 0.5% | 1.27x |
+| scale bytes (2) | 1,080 | 12,348 | 0.1% | 11.43x |
+| kind | 96 | 9,189 | 0.0% | 95.72x |
 | reseed | 11 | 11 | 0.0% | 1.00x |
-| framing | 911 | — | 0.1% | — |
+| framing | 979 | — | 0.1% | — |
 
-The frames are 93.5% of the file and everything structured together is 6.4%.
+The frames are 91.2% of the file and everything structured together is 8.7%.
 That is the price of the index, and it is the honest argument for design A:
-option B would have removed 93.5% of the bytes and all of the evidence.
+option B would have removed 91% of the bytes and all of the evidence.
 
-The timestamp columns are the only structured ones that cost anything, and both
-for the same reason — nanosecond resolution on a feed that delivers tens of
-messages a second leaves about 3.5 bytes of varint per row.
+The timestamp columns are the only structured ones that cost real bytes, and
+both for the same reason — nanosecond resolution on a feed delivering tens of
+messages a second leaves about 3.5 bytes of varint per row. The price column is
+the delta encoding working as intended: 7,123 bytes of scaled integers into
+1,676, on top of the 6,174 bytes of scale digits that compress 17x because they
+never change.
 
 **Read cost.** The same fixture window, replayed out of both formats:
 
@@ -221,7 +225,9 @@ messages a second leaves about 3.5 bytes of varint per row.
 | Iterator + canonical NDJSON | 109,940 events/sec | 87,317 events/sec |
 
 21% slower to replay, 5.2x smaller to store. The frames have to be inflated
-before anything can decode them, and that is the whole of the difference.
+before anything can decode them, and that is the whole of the difference. On
+the live windows above, `tape verify` reads v1 at 111,170 events/sec and v2 at
+91,308 — 1,783 times the wall-clock time the window took to record.
 
 **Determinism.** The golden fixture, transcoded to columnar and replayed,
 produces 2,197,803 bytes of canonical NDJSON and

@@ -22,7 +22,7 @@
 // bytes either way. The columns exist so that a scan — which windows hold
 // trades above X, where does this sequence range live — can read a few tens of
 // kilobytes instead of decompressing megabytes of JSON. On a live BTC-USD
-// window they cost 6.4% of the file; the measurement is in docs/columnar.md.
+// window they cost 8.7% of the file; the measurement is in docs/columnar.md.
 //
 // Reconstructing the frames from the columns instead of storing them was the
 // alternative, and it would roughly double the ratio. It is not done because
@@ -75,7 +75,7 @@ import (
 const Version uint16 = 2
 
 // FooterSize is the size in bytes of a batch footer.
-const FooterSize = 36
+const FooterSize = 40
 
 // batchLenSize is the uint32 length prefix in front of a batch body.
 const batchLenSize = 4
@@ -86,8 +86,12 @@ const batchLenSize = 4
 // to death.
 const MaxBatchBody = 64 << 20
 
-// MaxRows bounds the row count a footer may claim, for the same reason.
-const MaxRows = 1 << 24
+// MaxRows bounds the row count a footer may claim. It matters more than the
+// other limits: the footer is not covered by the body's checksum, so a row
+// count is the one field a corrupt file can lie about and still pass every
+// check before the allocation. A million is 256 times what this build writes
+// and bounds the allocation at something a machine can refuse politely.
+const MaxRows = 1 << 20
 
 // Batch sizing. Bigger batches compress better and cost more memory to decode,
 // since a batch is decoded whole. 4096 rows of BTC-USD is about 2.7 MB of
@@ -162,7 +166,15 @@ type Footer struct {
 	// prefix so that a footer locates its own body.
 	BodyLen uint32
 
-	// CRC is Castagnoli over the body.
+	// BodyCRC is Castagnoli over the body.
+	BodyCRC uint32
+
+	// CRC is Castagnoli over the rest of the footer.
+	//
+	// The footer needs one of its own because Scan reads it without the body,
+	// and the field it is read for is the gap flag. A summary that can quietly
+	// be wrong about whether a batch contains a gap is the fast path defeating
+	// invariant 2, so the summary is checksummed on its own terms.
 	CRC uint32
 }
 
@@ -182,7 +194,8 @@ func (f Footer) encode() []byte {
 	binary.LittleEndian.PutUint64(b[12:20], uint64(f.MinRecv))
 	binary.LittleEndian.PutUint64(b[20:28], uint64(f.MaxRecv))
 	binary.LittleEndian.PutUint32(b[28:32], f.BodyLen)
-	binary.LittleEndian.PutUint32(b[32:36], f.CRC)
+	binary.LittleEndian.PutUint32(b[32:36], f.BodyCRC)
+	binary.LittleEndian.PutUint32(b[36:40], checksum(b[0:36]))
 	return b
 }
 
@@ -201,7 +214,12 @@ func decodeFooter(b []byte) (Footer, error) {
 		MinRecv: int64(binary.LittleEndian.Uint64(b[12:20])),
 		MaxRecv: int64(binary.LittleEndian.Uint64(b[20:28])),
 		BodyLen: binary.LittleEndian.Uint32(b[28:32]),
-		CRC:     binary.LittleEndian.Uint32(b[32:36]),
+		BodyCRC: binary.LittleEndian.Uint32(b[32:36]),
+		CRC:     binary.LittleEndian.Uint32(b[36:40]),
+	}
+	if got := checksum(b[0:36]); got != f.CRC {
+		return Footer{}, fmt.Errorf("%w: footer checksum %08x, footer says %08x",
+			ErrChecksum, got, f.CRC)
 	}
 	if f.Version != Version {
 		return Footer{}, fmt.Errorf("%w: batch is v%d, this build reads v%d",

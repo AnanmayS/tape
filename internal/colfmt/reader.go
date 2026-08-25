@@ -159,9 +159,9 @@ func readBatch(r io.Reader) ([]byte, Footer, error) {
 		return nil, Footer{}, fmt.Errorf("%w: footer says %d body bytes, prefix says %d",
 			ErrCorrupt, f.BodyLen, n)
 	}
-	if got := checksum(body); got != f.CRC {
+	if got := checksum(body); got != f.BodyCRC {
 		return nil, Footer{}, fmt.Errorf("%w: body checksum %08x, footer says %08x",
-			ErrChecksum, got, f.CRC)
+			ErrChecksum, got, f.BodyCRC)
 	}
 	return body, f, nil
 }

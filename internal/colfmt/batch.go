@@ -324,7 +324,7 @@ func encodeBatch(rows []row) ([]byte, error) {
 		MinRecv: minRecv,
 		MaxRecv: maxRecv,
 		BodyLen: uint32(len(body)),
-		CRC:     checksum(body),
+		BodyCRC: checksum(body),
 	}
 	out := make([]byte, 0, batchLenSize+len(body)+FooterSize)
 	out = binary.LittleEndian.AppendUint32(out, uint32(len(body)))
@@ -493,7 +493,15 @@ func decodeExceptions(b []byte) (map[int]string, error) {
 		return nil, nil
 	}
 	c := &cursor{b: b}
-	n := int(c.uvarint())
+	// Each exception costs at least two bytes to encode, so a count larger than
+	// the column is a corrupt count and not a large one. Checked before the
+	// allocation it would otherwise size.
+	n64 := c.uvarint()
+	if c.err != nil || n64 > uint64(len(b)/2) {
+		return nil, fmt.Errorf("%w: exception column claims %d entries in %d bytes",
+			ErrCorrupt, n64, len(b))
+	}
+	n := int(n64)
 	out := make(map[int]string, n)
 	idx := 0
 	for i := 0; i < n; i++ {

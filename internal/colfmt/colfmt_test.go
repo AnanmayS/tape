@@ -504,6 +504,25 @@ func TestChecksumCatchesCorruption(t *testing.T) {
 		bodyLen, checksumCaught, decoderCaught)
 }
 
+// TestCorruptFooterIsRefused covers the half of a batch the body's checksum
+// cannot reach. The footer is what Scan reads and the gap flag is what it is
+// read for, so a footer that can be quietly wrong is the fast path quietly
+// losing a gap. Every byte of one is flipped in turn.
+func TestCorruptFooterIsRefused(t *testing.T) {
+	rows := realisticRows(200, 13)
+	batch, err := encodeBatch(rows)
+	if err != nil {
+		t.Fatalf("encodeBatch: %v", err)
+	}
+	for i := len(batch) - FooterSize; i < len(batch); i++ {
+		corrupt := append([]byte(nil), batch...)
+		corrupt[i] ^= 0x40
+		if _, _, err := readBatch(bytes.NewReader(corrupt)); err == nil {
+			t.Fatalf("byte %d of the footer was flipped and the batch was accepted", i)
+		}
+	}
+}
+
 // TestFootersAreScannable is the columnar layout's other payoff: what a window
 // holds can be read without decompressing it.
 func TestFootersAreScannable(t *testing.T) {

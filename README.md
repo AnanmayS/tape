@@ -221,38 +221,42 @@ The only new dependency is `aws-sdk-go-v2` (config, credentials, s3).
 
 ### M5 — columnar storage
 
-Measured on three minutes of live BTC-USD, 6,384 records, captured twice
+Measured on three minutes of live BTC-USD, 9,189 records, captured twice
 concurrently — once per format — so the two numbers are the same market and not
 two different minutes:
 
 | | |
 |---|---|
-| Raw frames — what NDJSON would store | 4,896,303 bytes |
-| v1 tape files | 4,979,337 bytes |
-| v2 columnar | 949,523 bytes |
-| **Compression ratio** | **5.16x against the frames, 5.24x against v1** |
+| Raw frames — what NDJSON would store | 5,130,188 bytes |
+| v1 tape files | 5,249,687 bytes |
+| v2 columnar | 1,002,748 bytes |
+| **Compression ratio** | **5.12x against the frames, 5.24x against v1** |
 
 Where the columnar bytes go:
 
 | column | encoded | raw | share of file |
 |---|---|---|---|
-| frames | 888,255 | 4,909,013 | 93.5% |
-| recv timestamp | 22,935 | 23,867 | 2.4% |
-| exchange timestamp | 21,004 | 23,006 | 2.2% |
-| size | 4,604 | 5,768 | 0.5% |
-| sequence | 3,581 | 4,246 | 0.4% |
-| price | 2,007 | 4,331 | 0.2% |
-| message type | 1,312 | 6,531 | 0.1% |
-| presence bitsets, scales, kind, reseed | 4,914 | 17,915 | 0.5% |
-| batch and block framing | 911 | — | 0.1% |
+| frames | 914,906 | 5,148,505 | 91.2% |
+| recv timestamp | 30,904 | 32,399 | 3.1% |
+| exchange timestamp | 29,377 | 32,760 | 2.9% |
+| size | 11,947 | 14,179 | 1.2% |
+| sequence | 4,820 | 6,801 | 0.5% |
+| price | 1,676 | 7,123 | 0.2% |
+| message type | 1,494 | 9,336 | 0.1% |
+| presence bitsets, scales, kind, reseed | 6,645 | 28,466 | 0.7% |
+| batch and block framing | 979 | — | 0.1% |
+
+The columnar figure is what `tape stat` computed for those exact records; the
+concurrent columnar capture wrote 1,003,688 bytes for its own 9,207, which is
+the same answer arrived at from the other side.
 
 **The raw frames are kept.** Reconstructing them from the columns instead would
-roughly double the ratio, since they are 93.5% of the file, and it is not done:
+roughly double the ratio, since they are 91% of the file, and it is not done:
 byte-exact reconstruction of Coinbase JSON would mean reproducing its field
 order, its full key set and its number formatting forever, and a reconstruction
 that is 99.99% right hands back something the exchange never sent while looking
 completely healthy. The frame is what settles an argument. Everything
-structured costs 6.4% of the file and buys scans that never inflate a frame.
+structured costs 8.7% of the file and buys scans that never inflate a frame.
 
 **Determinism survived again.** The M3 golden fixture, transcoded to columnar
 and replayed, produces 2,197,803 bytes of canonical NDJSON and `sha256
@@ -262,7 +266,9 @@ some files in each format produces it too, because format is a property of a
 file and the reader hands the replay layer byte-identical records either way.
 
 Reading costs 21%: the same fixture window replays at 109,940 events/sec from
-v1 and 87,317 from v2, both including canonical NDJSON.
+v1 and 87,317 from v2, both including canonical NDJSON. On the live window
+above, `tape verify` runs at 111,170 events/sec over v1 and 91,308 over v2 —
+1,783x the wall-clock time it took to record.
 
 **No new dependency.** `klauspost/compress` was allowed for this milestone and
 was measured against stdlib deflate on the real frames. At comparable speed zstd
