@@ -293,8 +293,7 @@ func (s *sink) checkSequence(e event.Event, at time.Time) error {
 	a, stale := s.seq.observe(e.Product, e.Sequence)
 	if stale {
 		s.sum.StaleMessages++
-		s.log.Debug("stale message after reseed",
-			"product", e.Product, "sequence", e.Sequence)
+		s.log.Debug("stale message after reseed", "sequence", e.Sequence)
 		return nil
 	}
 	if a.Kind == AnomalyNone {
@@ -304,7 +303,6 @@ func (s *sink) checkSequence(e event.Event, at time.Time) error {
 	s.sum.Gaps++
 	s.log.Warn("sequence gap",
 		"kind", a.Kind.String(),
-		"product", e.Product,
 		"expected", a.Expected,
 		"got", a.Got,
 		"missing", int64(a.Got)-int64(a.Expected))
