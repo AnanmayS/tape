@@ -70,6 +70,7 @@ go build -o tape ./cmd/tape
 ./tape capture -dir data -window 5m
 ./tape capture -dir data -format columnar
 ./tape capture -dir data -s3-bucket my-tape-bucket
+./tape capture -dir data -s3-bucket my-tape-bucket -metrics-namespace Tape
 ./tape verify data/v1/symbol=BTC-USD/date=2026-08-25
 ./tape verify -s3-bucket my-tape-bucket v1/symbol=BTC-USD/date=2026-08-25
 ./tape replay -continue-on-gap data/v1/symbol=BTC-USD/date=2026-08-25 > window.ndjson
@@ -112,6 +113,12 @@ run off the capture path, retry with backoff, and are logged at error level if
 they run out of attempts. Region, endpoint and credentials come from the ambient
 AWS configuration — the ECS task role in production — and are never flags.
 
+With `-metrics-namespace`, five numbers a minute go to CloudWatch: messages,
+message rate, gaps, ingest lag and peak queue depth. It is off unless asked for,
+so a local capture never needs AWS, and a publish that fails is a log line
+rather than a lost frame. Deployment — Terraform, the image, and the teardown
+that has to leave nothing billable — is in [docs/deploy.md](docs/deploy.md).
+
 `replay` writes a window to stdout as canonical NDJSON, in a fixed total order
 documented in [docs/replay.md](docs/replay.md). It stops at a gap or a
 reconnect unless told otherwise, and `verify` exits non-zero on a window that
@@ -122,8 +129,14 @@ it is where the compression ratio below comes from.
 
 M1 through M5 done: WebSocket ingest, sequence-gap detection, reconnect with
 backoff, deterministic replay, S3 storage partitioned by symbol, date and hour,
-and a delta-encoded columnar format measured at 5.2x against the raw feed. M6
-(Terraform and ECS) is next.
+and a delta-encoded columnar format measured at 5.2x against the raw feed.
+
+M6 is written but not applied. The Terraform, the metrics the ingester
+publishes, the image and the CI are all in the repository and all of them are
+checked as far as they can be checked without an AWS account; nothing has been
+deployed, and the section below says exactly which claims are still unproven.
+M7 (backpressure under load) is next, and is the milestone that turns the open
+question in CLAUDE.md into a number.
 
 ### M1 and M2 — capture
 
@@ -299,3 +312,76 @@ the default then, on a number.
 
 The full design note, the codec measurements and the column-by-column reasoning
 are in [docs/columnar.md](docs/columnar.md).
+
+### M6 — deployment
+
+Everything in [`terraform/`](terraform), the [`Dockerfile`](Dockerfile), the
+five metrics the ingester publishes, and the CI that checks all of it. The full
+lifecycle — build, push, apply, verify, pause, destroy — is in
+[docs/deploy.md](docs/deploy.md).
+
+**Three services, and the count is the design.** S3 holds the captures, one
+Fargate task runs the ingester, CloudWatch carries its logs, metrics and alarms.
+ECR and IAM are in the stack because a container has to come from somewhere and
+run as someone. There is no queue between the socket and the writer, no table,
+no cluster orchestrator, and no VPC — a private subnet would need a NAT gateway,
+which is about $32 a month to hide a task that accepts no inbound connections at
+all. Running, the whole thing is roughly $0.40 a day, and `-var desired_count=0`
+stops nearly all of that without destroying anything.
+
+**The task role is the interesting file.** It has two statements:
+`s3:PutObject` on one key prefix of one bucket, and `cloudwatch:PutMetricData`
+conditioned on one namespace. No `GetObject`, because the capture path never
+reads an object back. No `DeleteObject`, because nothing in this project deletes
+a capture and a role that cannot delete one states that more firmly than a code
+review does. No `ListBucket`, because a conditional put needs no listing.
+`PutMetricData` takes no resource ARN, so the namespace condition is the only
+thing standing between "publish our own five metrics" and "write into any
+namespace in the account, including `AWS/ECS`".
+
+**Five metrics, aggregated locally.** Messages, message rate, gaps, ingest lag
+and peak queue depth, folded client-side and sent in one `PutMetricData` call a
+minute. Emission is off unless `-metrics-namespace` is given, so a local capture
+never touches AWS. Ingest lag is measured from the exchange's timestamp to the
+moment the record is written rather than to the socket read, so the time a frame
+spends waiting in the reader-to-writer channel is inside the number rather than
+hidden behind it — that wait is what grows when the feed outruns the writer, and
+it is what M7 exists to characterise. It is published as a StatisticSet, because
+the interesting event is one message arriving late among thousands that did not
+and an average over a minute buries it.
+
+Nothing unmeasured is published as a zero: an interval in which no frame carried
+an exchange timestamp has no lag, and no observation of the queue is not an
+observation of an empty queue. An interval in which nothing happened does
+publish its zero counts, because a flat line and a hole in the graph mean
+different things.
+
+**The gap alarm's threshold is zero,** because the right number of gaps is zero.
+A gap means a reconnect lost frames the public feed will not sell back, and
+there is no acceptable rate to tune that to.
+
+**`force_destroy = false`,** so `terraform destroy` fails while captures are in
+the bucket. Teardown is a command this project runs between every session, and
+one that quietly deleted the data would be the most dangerous line in the repo.
+The emptying procedure — sync, count, replay the local copy and compare digests,
+then delete — is in the deploy doc.
+
+**Two packages, no AWS in the tested one.** `internal/metrics` holds every
+decision and imports no SDK; `internal/metrics/cwmetrics` is a translator whose
+single CloudWatch call sits behind a two-line interface. The split is the same
+one `storage` and `s3store` already use, for the same reason: a package that
+needs a credential to test is a package that stops being tested. The whole suite
+still runs with no AWS account and no `-short` flag anywhere.
+
+**What is not verified.** This has never been applied, and the claims that
+depend on an apply are not made. No `plan`, no `apply`: CI runs `terraform fmt
+-check`, `init -backend=false` and `validate`, which catch syntax, type and
+reference errors and cannot catch a resource AWS rejects at create time or an
+IAM policy that is valid but too narrow. The task role has not been proven
+sufficient. The image has not been built here — the machine it was written on
+cannot reach a Docker daemon — though both the amd64 and arm64 static builds
+succeed, so CI's `docker` job is the first real build. And the end-to-end check
+that matters most, inducing a gap on a live deployment and watching the alarm
+deliver, can only happen after a deploy. Every link in that chain is tested in
+isolation; none of it is tested joined up. [docs/deploy.md](docs/deploy.md)
+keeps the same list.
