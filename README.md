@@ -68,6 +68,8 @@ broad one that is half-finished.
 ```
 go build -o tape ./cmd/tape
 ./tape capture -dir data -window 5m
+./tape verify data/BTC-USD/2026-08-25
+./tape replay -continue-on-gap data/BTC-USD/2026-08-25 > window.ndjson
 ```
 
 Ctrl-C stops the capture cleanly and prints a counted session summary. The
@@ -81,10 +83,17 @@ magic-and-version header followed by length-prefixed records: message records
 carrying the raw frame verbatim plus a receive timestamp, gap records, and
 reseed records. Files are opened once with `O_APPEND` and never reopened.
 
+`replay` writes a window to stdout as canonical NDJSON, in a fixed total order
+documented in [docs/replay.md](docs/replay.md). It stops at a gap or a
+reconnect unless told otherwise, and `verify` exits non-zero on a window that
+contains one.
+
 ## Status
 
-M1 and M2 done: WebSocket ingest to local disk, sequence-gap detection,
-reconnect with backoff. M3 (the replay library) is next.
+M1, M2 and M3 done: WebSocket ingest to local disk, sequence-gap detection,
+reconnect with backoff, and deterministic replay. M4 (S3 storage) is next.
+
+### M1 and M2 — capture
 
 Measured on a live BTC-USD capture, 100s, one-minute windows:
 
@@ -104,3 +113,30 @@ severed every 25s: three reconnects produced three reseed records and three
 gap records, of 649, 526 and 3,240 missing sequence numbers. Coinbase offers
 no backfill on the public feed, so those windows are marked untrustworthy
 rather than silently continued.
+
+### M3 — replay
+
+Determinism is verified, not asserted. The test fixture is 2,340 real BTC-USD
+frames across three files, with a reseed and a gap of 1,464 missing sequence
+numbers produced by the capture path itself. Replaying it twice gives
+2,197,803 bytes of canonical NDJSON both times, `sha256
+ee9576040361b07272db0cb6e614b02cef53dec1fcc772aeea1fa609b4fb7a21`, and that
+digest is checked into the test. A second test reads the same window, shuffles
+every record with five seeds and sorts it with an unstable sort: all five agree
+with the streaming replay, which is what says the ordering key leaves no tie
+behind. Neither test is skippable.
+
+Replay throughput, measured on that fixture:
+
+| | |
+|---|---|
+| Iterator alone | 198,000–204,000 events/sec, ~6,500x wall-clock |
+| Iterator + canonical NDJSON | 108,000–109,000 events/sec, ~3,550x wall-clock |
+
+On a live 3m20s capture — 6,434 records, 5.4 MB across four files, level2
+snapshot included — `tape verify` replays the whole window in 72 ms: 89,844
+events/sec, 2,790x the wall-clock time it took to record.
+
+Memory is bounded by a reorder buffer of 4,096 records rather than by the
+window, and a window whose stored order is displaced further than that fails
+with `ErrOutOfOrder` instead of emitting a stream that is quietly misordered.
