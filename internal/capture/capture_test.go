@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AnanmayS/tape/internal/colfmt"
 	"github.com/AnanmayS/tape/internal/feed"
 	"github.com/AnanmayS/tape/internal/metrics"
 	"github.com/AnanmayS/tape/internal/tapefile"
@@ -36,14 +37,28 @@ type counts struct {
 	gapRecords              []tapefile.Gap
 }
 
+// openRecords opens a stored file in whichever format it was written in. Tests
+// assert what a session recorded, not which of the two shapes it recorded it
+// in, and a helper that only reads one of them would quietly become a test of
+// the default.
+func openRecords(t *testing.T, path string) tapefile.Records {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	r, err := colfmt.OpenRecords(f)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	return r
+}
+
 func readAll(t *testing.T, files []string) counts {
 	t.Helper()
 	var c counts
 	for _, p := range files {
-		r, err := tapefile.Open(p)
-		if err != nil {
-			t.Fatalf("open %s: %v", p, err)
-		}
+		r := openRecords(t, p)
 		c.files = append(c.files, p)
 		for {
 			typ, payload, err := r.Next()
@@ -87,10 +102,7 @@ func recordOrder(t *testing.T, files []string) []string {
 	t.Helper()
 	var order []string
 	for _, p := range files {
-		r, err := tapefile.Open(p)
-		if err != nil {
-			t.Fatalf("open %s: %v", p, err)
-		}
+		r := openRecords(t, p)
 		for {
 			typ, _, err := r.Next()
 			if errors.Is(err, io.EOF) {

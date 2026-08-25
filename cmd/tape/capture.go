@@ -20,8 +20,8 @@ func runCapture(args []string) error {
 	fs := flag.NewFlagSet("capture", flag.ExitOnError)
 	dir := fs.String("dir", "data", "root directory for tape files")
 	window := fs.Duration("window", tapefile.DefaultWindow, "wall-clock file rotation window")
-	format := fs.String("format", string(capture.FormatRaw),
-		"on-disk format: raw (v1 record log) or columnar (v2, ~5.8x smaller)")
+	format := fs.String("format", string(capture.FormatColumnar),
+		"on-disk format: columnar (v2, 5.2x smaller) or raw (v1 record log)")
 	buffer := fs.Int("buffer", 4096, "reader-to-writer channel depth")
 	flushEvery := fs.Duration("flush", time.Second, "maximum time a record sits in the write buffer")
 	duration := fs.Duration("duration", 0, "stop after this long; 0 runs until interrupted")
@@ -38,12 +38,15 @@ func runCapture(args []string) error {
 				"The exchange, product and channels are fixed for v1 and are not flags.\n\n"+
 				"Files land at -dir plus their storage key:\n"+
 				"  v1/symbol={symbol}/date={date}/hour={hour}/{window start}.tape\n\n"+
-				"-format columnar writes the delta-encoded columnar format, 5.8x smaller on a\n"+
-				"real BTC-USD window and byte-identical on replay — replay reads either, per\n"+
-				"file, by its version byte. raw is still the default because capture is the\n"+
-				"half of this project that cannot be re-run and the columnar writer has not\n"+
-				"yet met a live feed under load. M7 measures both; if columnar sustains the\n"+
-				"same rate, it becomes the default then.\n\n"+
+				"The default is the delta-encoded columnar format: 5.2x smaller on a real\n"+
+				"BTC-USD window, byte-identical on replay, and measured at 49,800 messages a\n"+
+				"second — 1,330 times what this feed produces. -format raw writes the v1\n"+
+				"record log instead, 4.9x faster and 5.2x larger. Replay reads either, per\n"+
+				"file, by its version byte.\n\n"+
+				"Backpressure is not a flag. When the writer falls behind the reader waits,\n"+
+				"because that is the only one of the three policies whose worst case is\n"+
+				"already a gap record. The measurement is in README.md and `tape bench`\n"+
+				"reproduces it.\n\n"+
 				"With -s3-bucket, each file is uploaded as it closes, under that same key.\n"+
 				"Local disk stays the durable copy: an unreachable bucket costs a re-upload,\n"+
 				"never a frame, and the upload is logged loudly rather than failing capture.\n\n"+

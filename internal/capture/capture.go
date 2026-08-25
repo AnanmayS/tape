@@ -38,8 +38,8 @@ const (
 	// FormatRaw is the v1 record log: every frame written as it arrives.
 	FormatRaw Format = "raw"
 
-	// FormatColumnar is the v2 delta-encoded columnar format, about 5.8 times
-	// smaller on a real BTC-USD window.
+	// FormatColumnar is the v2 delta-encoded columnar format, 5.2 times smaller
+	// on a real BTC-USD window. It is the default.
 	FormatColumnar Format = "columnar"
 )
 
@@ -57,8 +57,10 @@ type Config struct {
 	// Upload configures the uploader used when Store is set.
 	Upload storage.UploadConfig
 
-	// Format is the on-disk format. Empty means FormatRaw; see the flag's help
-	// in cmd/tape for why that is still the default.
+	// Format is the on-disk format. Empty means FormatColumnar: it stores the
+	// same records 5.2x smaller, replays byte-identically, and sustains 1,300
+	// times the rate the live feed produces. M7 measured that; README.md has
+	// the number.
 	Format Format
 
 	// Window is the wall-clock rotation window.
@@ -86,7 +88,7 @@ type Config struct {
 
 func (c *Config) withDefaults() {
 	if c.Format == "" {
-		c.Format = FormatRaw
+		c.Format = FormatColumnar
 	}
 	if c.Window <= 0 {
 		c.Window = tapefile.DefaultWindow
