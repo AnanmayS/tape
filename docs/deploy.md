@@ -52,6 +52,11 @@ data.
 - Credentials for an account you are willing to create and destroy things in.
 - Docker, to build the image.
 
+There is no `.terraform.lock.hcl` in the repository, because `terraform init`
+has never been run against this configuration. The first `init` writes one;
+commit it, so that every later apply resolves the same provider build rather
+than whatever `~> 6.0` means that week.
+
 ## The lifecycle
 
 ### 1. Create the infrastructure, paused
