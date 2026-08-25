@@ -262,4 +262,4 @@ frames while it does.
 What is still true is the exposure a hard kill carries: a SIGKILL loses the
 batch in flight, up to 4,096 records, where v1 would have lost only the last
 flush. A clean stop — including the SIGTERM ECS sends — loses nothing, and the
-tables in the M7 section of README.md are the rest of the argument.
+tables in the M7 section of docs/results.md are the rest of the argument.

@@ -87,7 +87,7 @@ Adding a sixth means saying here what question it answers that the log does not.
 
 **Backpressure blocks, and the number that decided it is 52.2%.** All three
 policies were built and measured at saturation with `tape bench` (M7 in
-`README.md` has the full tables). The measurement that settles it is the one
+`docs/results.md` has the full tables). The measurement that settles it is the one
 where every policy is offered the same rate — twice what the writer can take:
 **block wrote 49,600 messages a second and lost nothing; drop wrote 47,900 and
 lost 52.2% of the feed; buffer wrote 51,100 and grew the heap by 537 MiB in
