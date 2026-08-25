@@ -66,6 +66,49 @@ func TestDecodeMatch(t *testing.T) {
 	}
 }
 
+// TestDecodeKeepsWireDecimals covers the fields the columnar format stores. A
+// stored price has to come back as the characters the exchange sent, and the
+// float cannot supply them: it has no memory of how many digits it was written
+// with, so "80691.5" and "80691.50" are one number and two prices.
+func TestDecodeKeepsWireDecimals(t *testing.T) {
+	e, err := Decode([]byte(matchFrame), time.Now())
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if e.PriceText != "80691.53" {
+		t.Errorf("PriceText = %q, want %q", e.PriceText, "80691.53")
+	}
+	if e.SizeText != "0.00000001" {
+		t.Errorf("SizeText = %q, want %q", e.SizeText, "0.00000001")
+	}
+
+	short, err := Decode([]byte(`{"type":"match","price":"80691.5","size":"1"}`), time.Now())
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	padded, err := Decode([]byte(`{"type":"match","price":"80691.50","size":"1.000"}`), time.Now())
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if short.Price != padded.Price || short.Size != padded.Size {
+		t.Fatal("the two frames should decode to the same floats; this test's premise is gone")
+	}
+	if short.PriceText == padded.PriceText || short.SizeText == padded.SizeText {
+		t.Errorf("the wire decimals were normalised: %q/%q and %q/%q",
+			short.PriceText, short.SizeText, padded.PriceText, padded.SizeText)
+	}
+
+	// A frame with no price levels carries no decimals either, and "" is how
+	// that is spelled — not "0", which would be a price.
+	l2, err := Decode([]byte(l2updateFrame), time.Now())
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if l2.PriceText != "" || l2.SizeText != "" {
+		t.Errorf("l2update carried decimals: %q %q", l2.PriceText, l2.SizeText)
+	}
+}
+
 func TestDecodeLastMatchIsMatchesChannel(t *testing.T) {
 	e, err := Decode([]byte(lastMatchFrame), time.Now())
 	if err != nil {

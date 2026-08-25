@@ -22,9 +22,16 @@ const (
 
 // Event is the decoded view of one feed frame.
 //
-// Price and Size are parsed from the wire strings for convenience. The wire
-// strings inside Raw remain authoritative; M5's columnar encoding will use
-// scaled integers rather than these floats.
+// Price and Size are float64 for convenience and PriceText and SizeText are the
+// exchange's decimal strings, character for character. Both are here because
+// they answer different questions and only one of them is safe to store: a
+// float is what arithmetic wants, and a decimal string is what a stored record
+// has to survive as. Coinbase sends "80691.53"; the nearest float64 to it is
+// not 80691.53, so a format that stored the float and re-rendered it would be
+// inventing a price that the exchange never sent. The columnar format encodes
+// PriceText and SizeText as exact scaled integers and never touches the floats.
+//
+// The wire strings inside Raw remain authoritative over both.
 //
 // Side, Price and Size are populated for trade-shaped messages (match,
 // last_match). An l2update carries a list of changes rather than a single
@@ -58,6 +65,11 @@ type Event struct {
 	Side  string
 	Price float64
 	Size  float64
+
+	// PriceText and SizeText are the wire decimals verbatim, "" when the frame
+	// carried none. They are what the columnar format stores.
+	PriceText string
+	SizeText  string
 
 	// Raw is the frame exactly as it came off the wire.
 	Raw []byte
@@ -103,12 +115,14 @@ func Decode(raw []byte, recv time.Time) (Event, error) {
 	}
 
 	e := Event{
-		Type:     w.Type,
-		Channel:  channelFor(w.Type),
-		Product:  w.ProductID,
-		RecvTime: recv,
-		Side:     w.Side,
-		Raw:      raw,
+		Type:      w.Type,
+		Channel:   channelFor(w.Type),
+		Product:   w.ProductID,
+		RecvTime:  recv,
+		Side:      w.Side,
+		PriceText: w.Price,
+		SizeText:  w.Size,
+		Raw:       raw,
 	}
 	if w.Sequence != nil {
 		e.Sequence, e.HasSequence = *w.Sequence, true
