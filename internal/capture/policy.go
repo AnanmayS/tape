@@ -13,7 +13,7 @@ import (
 // The three options are the only three there are, and each is wrong in its own
 // way. What decides between them is not which failure is nicest but which
 // failure the rest of this project can still tell the truth about. See
-// CLAUDE.md for the measurement and the decision it produced; what follows is
+// docs/decisions.md for the measurement and the decision it produced; what follows is
 // what each one costs.
 type Policy string
 

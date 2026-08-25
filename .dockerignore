@@ -12,5 +12,4 @@ tape
 bin
 Dockerfile
 .dockerignore
-README.md
-CLAUDE.md
+*.md

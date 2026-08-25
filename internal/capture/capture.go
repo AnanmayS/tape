@@ -6,7 +6,7 @@
 // socket read that stops draining the kernel buffer, and what the queue does
 // when it fills is the backpressure policy — block, drop or buffer. It is
 // PolicyBlock, by measurement rather than by default; policy.go says what each
-// one costs and CLAUDE.md carries the number that decided it.
+// one costs and docs/decisions.md carries the number that decided it.
 //
 // Two things about that queue are instrumented, because they are the two halves
 // of the same question. Its depth says the writer fell behind. The per-record

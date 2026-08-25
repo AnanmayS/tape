@@ -148,7 +148,7 @@ deployed, and the M6 section below says exactly which claims are still unproven.
 
 ### The five numbers
 
-These are the deliverables `CLAUDE.md` commits to. Every one comes from running
+These are the deliverables `docs/decisions.md` commits to. Every one comes from running
 the thing; none is estimated. Hardware for the rate-dependent ones: **AMD Ryzen
 7 3700X** (8 cores, 16 threads), 31 GiB RAM, ext4 on NVMe, Go 1.27, Linux.
 
@@ -413,7 +413,7 @@ keeps the same list.
 
 The reader and the writer have always been separate goroutines with a queue
 between them, and what that queue does when it fills was the last open decision
-in `CLAUDE.md`. There were three candidates — block, drop, buffer — and the
+in `docs/decisions.md`. There were three candidates — block, drop, buffer — and the
 milestone's job was to make it a number rather than a preference.
 
 All three are implemented as one `feed.Sink` with three sends. `tape bench`
