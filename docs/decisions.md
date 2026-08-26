@@ -115,6 +115,31 @@ drop that is not a gap record is a window missing messages that reads as
 complete, which is exactly what invariant 2 forbids, so a drop policy without
 that record would not have been a legal candidate to measure.
 
+**The terminal layer draws, and is not allowed to do anything else.** `tape` has
+a presentation layer now — `capture -live`, the `verify` chart, `replay
+-pretty` — and the reason it does not violate anything in this file is that four
+rules were fixed before it was written. It adds no dependency: escape codes are
+strings and the terminal width comes from `COLUMNS`, so the list is still
+`aws-sdk-go-v2` and `coder/websocket`. It cannot reach a pipe: drawing is gated
+on `os.ModeCharDevice`, verified by piping rather than asserted. It cannot touch
+the canonical NDJSON: `-pretty` is a separate encoder reached by a branch
+outside `NewCanonicalEncoder`, and the golden digest
+`ee9576040361b07272db0cb6e614b02cef53dec1fcc772aeea1fa609b4fb7a21` still holds.
+
+And it costs the capture path nothing. The counters a panel wants belong to the
+writer goroutine and are unsynchronised on purpose; the sample is therefore
+taken *by that goroutine*, on a ticker beside the flush ticker it already has,
+and handed over as a value through a channel it never waits on. Not a lock, not
+an atomic, not an allocation per message — which is the only version of this
+feature that was allowed to exist, because 49,800 messages a second is a
+deliverable and a display is not. `docs/terminal.md` has the rest.
+
+No order-book depth view was built, and that is the interesting refusal. It is
+the most obviously attractive thing to draw here and it is on the README's
+non-goals list: reconstructing the book would make this project own a second
+definition of what the book is, beside the one in the limit-order-book
+simulator, and the first thing that would happen is the two disagreeing.
+
 **Capture defaults to the columnar format,** on the condition M5 attached to
 leaving it raw. Columnar sustains 49,800 messages a second, 1,330 times the live
 rate, while storing the same records 5.2x smaller and replaying to the same

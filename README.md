@@ -140,6 +140,16 @@ reproduce the comparison.
 Run `tape <command> -h` for flags. Ctrl-C stops a capture cleanly and prints a
 counted session summary.
 
+Three flags draw rather than print, and each does nothing at all unless stdout
+is a terminal, so a pipe gets exactly the bytes it always got. `capture -live`
+replaces the progress log with a status panel — rate, sparkline, queue depth,
+and the gap count in red the moment it leaves zero. `verify` draws the window's
+shape under its summary, with every gap marked where it happened; `-chart=false`
+turns that off. `replay -pretty` writes a readable event stream instead of
+canonical NDJSON, with gaps as banners you cannot scroll past. `-no-color` and
+`NO_COLOR` apply to all three. [docs/terminal.md](docs/terminal.md) has the
+details and the rules they follow.
+
 The exchange, product and channels are fixed for v1 and are deliberately not
 flags: Coinbase Exchange, `BTC-USD`, channels `level2_batch` and `matches`. The
 unbatched `level2` channel now requires authentication, and this project takes
@@ -185,3 +195,4 @@ would be a service to justify, and at this volume none of them is.
 | [docs/columnar.md](docs/columnar.md) | the columnar format: byte layout and codec measurements |
 | [docs/replay.md](docs/replay.md) | the total order replay guarantees, written down |
 | [docs/deploy.md](docs/deploy.md) | build, push, apply, verify, and the teardown that leaves nothing billable |
+| [docs/terminal.md](docs/terminal.md) | the three things that draw, and what they may never do |
