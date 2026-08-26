@@ -84,6 +84,17 @@ type Config struct {
 	// time. nil means metrics.Nop: a session that was not told where to publish
 	// does not publish, and reaches no network to find that out.
 	Metrics metrics.Recorder
+
+	// Progress, if non-nil, receives a Progress every ProgressInterval. The
+	// sample is taken by the writer goroutine, which owns every counter in it,
+	// and sent without blocking — see progress.go for why both halves of that
+	// sentence are load-bearing. nil means no ticker is created and the session
+	// does not sample itself at all.
+	Progress chan<- Progress
+
+	// ProgressInterval is how often Progress is sampled. Zero means
+	// DefaultProgressInterval. It is ignored when Progress is nil.
+	ProgressInterval time.Duration
 }
 
 func (c *Config) withDefaults() {
@@ -107,6 +118,9 @@ func (c *Config) withDefaults() {
 	}
 	if c.Metrics == nil {
 		c.Metrics = metrics.Nop{}
+	}
+	if c.ProgressInterval <= 0 {
+		c.ProgressInterval = DefaultProgressInterval
 	}
 }
 
@@ -286,6 +300,17 @@ func Run(ctx context.Context, f feed.Feed, cfg Config) (Summary, error) {
 	flush := time.NewTicker(cfg.FlushInterval)
 	defer flush.Stop()
 
+	// The progress ticker sits beside the flush ticker rather than in a
+	// goroutine of its own, because the counters it reads belong to this
+	// goroutine and nowhere else. With no display asked for, sampleC stays nil
+	// and its case can never be selected.
+	var sampleC <-chan time.Time
+	if cfg.Progress != nil {
+		sample := time.NewTicker(cfg.ProgressInterval)
+		defer sample.Stop()
+		sampleC = sample.C
+	}
+
 	var writeErr error
 drain:
 	for {
@@ -318,6 +343,8 @@ drain:
 				writeErr = err
 				break drain
 			}
+		case now := <-sampleC:
+			sink.sample(cfg.Progress, q, cfg.Buffer, now.UTC())
 		}
 	}
 	close(writerDone)
@@ -378,6 +405,13 @@ type recordWriter interface {
 	Flush() error
 	Close() error
 	Path() string
+
+	// PathFor is the file the window covering t belongs to, open or not. The
+	// columnar writer does not create a file until its first batch closes, so
+	// for the first few thousand records Path is empty and this is the only
+	// answer to "where is this session writing".
+	PathFor(time.Time) string
+
 	Stats() tapefile.Stats
 }
 

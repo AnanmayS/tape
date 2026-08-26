@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -26,10 +27,14 @@ func runCapture(args []string) error {
 	flushEvery := fs.Duration("flush", time.Second, "maximum time a record sits in the write buffer")
 	duration := fs.Duration("duration", 0, "stop after this long; 0 runs until interrupted")
 	logFormat := fs.String("log", "text", "log format: text or json")
+	live := fs.Bool("live", false,
+		"draw a status panel instead of progress log lines; ignored when stdout is not a terminal")
 	var store storeFlags
 	store.register(fs, "upload each closed file to")
 	var met metricsFlags
 	met.register(fs)
+	var term termFlags
+	term.register(fs)
 
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(),
@@ -54,6 +59,15 @@ func runCapture(args []string) error {
 				"message rate, gaps, ingest lag and peak queue depth. It is off unless asked\n"+
 				"for, so a local capture never needs AWS, and a publish that fails is a log\n"+
 				"line rather than a lost frame.\n\n"+
+				"With -live the progress log lines are replaced by a panel that redraws in\n"+
+				"place: rate, sparkline, bytes, queue depth against its ceiling, write\n"+
+				"latency, and the gap count in red the instant it stops being zero. It is a\n"+
+				"different view of counters the session already keeps — the sample is taken\n"+
+				"by the writer goroutine on a ticker, so it costs the path every message\n"+
+				"takes exactly nothing. Warnings are shown inside the panel rather than\n"+
+				"printed over it, and the counted session summary still lands on stderr at\n"+
+				"the end. Off a terminal the flag does nothing and the log lines are\n"+
+				"unchanged.\n\n"+
 				"flags:\n", feed.CoinbaseURL, feed.CoinbaseProduct,
 			[]string{feed.ChannelLevel2Batch, feed.ChannelMatches})
 		fs.PrintDefaults()
@@ -62,9 +76,19 @@ func runCapture(args []string) error {
 		return err
 	}
 
+	// The panel draws on stdout, so stdout is what decides whether it may draw.
+	// A capture whose stdout is a redirect keeps the log lines it always had.
+	caps := term.caps(os.Stdout)
+	drawing := *live && caps.TTY
+
 	log, err := newLogger(*logFormat)
 	if err != nil {
 		return err
+	}
+	var warn *warnBuffer
+	if drawing {
+		warn = &warnBuffer{}
+		log = newLiveLogger(log.Handler(), warn)
 	}
 
 	st, err := store.store(context.Background())
@@ -101,7 +125,7 @@ func runCapture(args []string) error {
 		"metrics", met.label(),
 		"seq_mode", f.SeqMode().String())
 
-	sum, runErr := capture.Run(ctx, f, capture.Config{
+	cfg := capture.Config{
 		Root:          *dir,
 		Format:        capture.Format(*format),
 		Store:         st,
@@ -110,7 +134,50 @@ func runCapture(args []string) error {
 		FlushInterval: *flushEvery,
 		Log:           log,
 		Metrics:       rec,
-	})
+	}
+
+	// The panel and the session communicate through one buffered sample. The
+	// session never waits on it; see internal/capture/progress.go.
+	//
+	// stopDash is idempotent and deferred as well as called, so a return on any
+	// path — including an error — still hands the terminal back its cursor and
+	// its logging.
+	var dash *liveDash
+	stopDash := func(capture.Summary) {}
+	if drawing {
+		ch := make(chan capture.Progress, progressBuffer)
+		cfg.Progress = ch
+		cfg.ProgressInterval = liveInterval
+
+		upload := ""
+		if st != nil {
+			upload = st.String()
+		}
+		dash = newLiveDash(os.Stdout, caps,
+			liveTitle(f.Name(), f.Product(), capture.Format(*format), *dir, upload), warn)
+		warn.hold()
+		drawn := make(chan struct{})
+		go func() {
+			defer close(drawn)
+			dash.run(ch)
+		}()
+
+		var once sync.Once
+		stopDash = func(sum capture.Summary) {
+			once.Do(func() {
+				close(ch)
+				<-drawn
+				// The final frame comes from the summary, which is the counted
+				// answer, and stays on screen under everything printed after it.
+				dash.finish(sum)
+				warn.release()
+			})
+		}
+		defer stopDash(capture.Summary{})
+	}
+
+	sum, runErr := capture.Run(ctx, f, cfg)
+	stopDash(sum)
 
 	// Flush the last interval before reporting, so the numbers in the log and
 	// the numbers on the graph describe the same session.
