@@ -9,6 +9,7 @@
 
 # Captured data — never commit market data
 /data/
+/demo-data/
 *.tape
 *.ndjson
 

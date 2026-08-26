@@ -2,13 +2,38 @@
 
 **Market data capture and deterministic replay.**
 
-Tape records live order-book and trade feeds from a public exchange, stores them
-about five times smaller than the raw JSON, and replays them so that a backtest
-over the same window produces the same result every single time.
+## What this is
 
-That last property is the point. If replaying one window twice can give two
-different answers, nothing built on top of it means anything — so "two replays
-are byte-identical" is a test in CI, not an aspiration.
+Exchanges broadcast every trade and every change to the order book the instant
+it happens — and then it's gone. Tape is a recorder for that stream. It writes
+the feed down as it arrives, stores it about five times smaller than the raw
+JSON, and plays it back later: identically, every time you press play.
+
+## What it's for
+
+Say you have a trading idea — *buy when the price crosses above its 20-minute
+average*. Before risking money on it, you want to know how it would have done
+last Tuesday. That means you need last Tuesday's market data, trade by trade.
+
+Two things go wrong. Exchanges give the live feed away for free and charge real
+money for history, so you end up recording it yourself. And a careless recorder
+drops its connection for ten seconds somewhere in the afternoon, leaving a file
+that looks perfectly healthy and is quietly missing a hundred trades. Your test
+says the idea made money. It didn't.
+
+Tape handles both. It records the free public feed, writes every hole it finds
+*into the data* where you can't miss it, and guarantees that replaying the same
+window twice gives byte-for-byte the same answer. So when a backtest's result
+changes, you know your strategy changed — not the ground underneath it.
+
+That last guarantee is the whole point of the project. If replaying one window
+twice can give two different answers, nothing built on top of it means anything,
+so "two replays are byte-identical" is a test in CI rather than an aspiration.
+
+Six other projects — futures backtesting, options pricing, earnings-surprise
+prediction, a Bollinger-bands strategy, a Polymarket paper-trader, and a limit
+order book simulator in C — all need historical market data, and each was
+improvising it. Tape is the layer underneath them.
 
 ## Quick start
 
@@ -16,10 +41,12 @@ are byte-identical" is a test in CI, not an aspiration.
 go build -o tape ./cmd/tape
 ```
 
-Capture two minutes of live BTC-USD (the feed is free and needs no account):
+Capture two minutes of live BTC-USD (the feed is free and needs no account).
+`-live` draws a status panel while it runs — rate, queue depth, and the gap
+count in red the moment it leaves zero:
 
 ```bash
-./tape capture -dir data -duration 2m
+./tape capture -dir data -duration 2m -live
 ```
 
 See what landed — message counts, gaps, files:
@@ -38,19 +65,9 @@ hashes; they match, every time:
 `go test ./...` runs the whole suite, including the determinism test, and needs
 no AWS account.
 
-## Why it exists
-
-Six other projects — futures backtesting, options pricing, earnings-surprise
-prediction, a Bollinger-bands strategy, a Polymarket paper-trader, and a limit
-order book simulator in C — all need historical market data, and all of them
-were improvising it. Tape is the layer underneath them.
-
-Exchanges give live data away and charge for history, so recording the free feed
-yourself builds an archive for the price of a small cloud task. The hard part
-isn't storing it; it's *knowing it's honest*. A recorder that loses its
-connection for ten seconds produces a file that looks perfectly healthy and is
-quietly missing a hundred trades. Every backtest over that file is wrong, and
-nothing tells you.
+Or run [`./demo.sh`](demo.sh), which does all of the above against the live feed
+in about seventy seconds — capturing twice so the second session opens with a
+real discontinuity, then checking that the window replays identically.
 
 ## The three rules
 
