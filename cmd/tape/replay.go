@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/AnanmayS/tape/internal/replay"
+	"github.com/AnanmayS/tape/internal/termui"
 )
 
 func runReplay(args []string) error {
@@ -94,6 +95,8 @@ func runVerify(args []string) error {
 		"records held in the reorder buffer while sorting")
 	var store storeFlags
 	store.register(fs, "verify from")
+	var chartOpt chartFlags
+	chartOpt.register(fs)
 
 	fs.Usage = func() {
 		fmt.Fprint(fs.Output(),
@@ -106,7 +109,11 @@ func runVerify(args []string) error {
 				"the local one it came from.\n\n"+
 				"It exits non-zero if the window is discontinuous. A window with a gap in it\n"+
 				"is untrustworthy — the public feed offers no backfill — and a verifier that\n"+
-				"returned success on one would be worse than no verifier.\n\nflags:\n")
+				"returned success on one would be worse than no verifier.\n\n"+
+				"On a terminal it also draws the window's shape under that summary: message\n"+
+				"density over time, one column per slice of the window, with file boundaries\n"+
+				"marked and every gap marked in red where it happened. The summary above it\n"+
+				"is unchanged and prints either way; -chart=false leaves only the summary.\n\nflags:\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -126,16 +133,31 @@ func runVerify(args []string) error {
 	}
 	defer r.Close()
 
+	caps := chartOpt.caps(os.Stdout)
+	drawing := chartOpt.drawing(caps)
+
+	// The chart is fed from the drain that was already reading every record. It
+	// costs one bucket increment per record and holds a bounded histogram, not
+	// the window.
+	ch := newChart()
 	h := sha256.New()
 	enc := replay.NewCanonicalEncoder(h)
 	started := time.Now()
-	replayErr := drain(r, func(rec replay.Record) error { return enc.Encode(rec) })
+	replayErr := drain(r, func(rec replay.Record) error {
+		if drawing {
+			ch.add(rec)
+		}
+		return enc.Encode(rec)
+	})
 	elapsed := time.Since(started)
 
 	printSummary(os.Stdout, r, elapsed)
 	fmt.Fprintf(os.Stdout, "  digest      sha256:%s\n", hex.EncodeToString(h.Sum(nil)))
 	for _, d := range r.Discontinuities() {
-		fmt.Fprintf(os.Stdout, "  ! %s\n", d)
+		fmt.Fprintf(os.Stdout, "  ! %s\n", caps.Paint(termui.ColorRed, d.String()))
+	}
+	if drawing {
+		ch.print(os.Stdout, caps)
 	}
 	if replayErr != nil {
 		return replayErr
