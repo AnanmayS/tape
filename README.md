@@ -29,10 +29,20 @@ The project is built around that property. If two replays of one window could
 disagree, every result above them would be worthless, so CI checks the digests
 on every push.
 
-Six other projects need historical market data: futures backtesting, options
-pricing, earnings-surprise prediction, a Bollinger-bands strategy, a Polymarket
-paper-trader, and a limit order book simulator in C. Each was improvising its
-own. Tape is the layer underneath them.
+Backtesting is one use. The same recordings answer questions that are hard to
+get at any other way:
+
+- **Debugging a live bot.** Your program did something strange on Tuesday
+  afternoon. Replay that window into it and watch it do the same thing again,
+  as many times as you need.
+- **Regression tests for trading code.** A test that feeds in real market data
+  and asserts an exact result depends on the data arriving the same way every
+  run. Otherwise it fails at random and people learn to ignore it.
+- **Microstructure research.** Questions about spreads, queue position, or how
+  fast the book refills after a large trade need tick-level history, and vendors
+  sell that by the month.
+- **Incident reconstruction.** After a crash or an outage, the recording is your
+  account of what the exchange published and when.
 
 ## Quick start
 
