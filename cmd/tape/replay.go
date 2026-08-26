@@ -24,8 +24,12 @@ func runReplay(args []string) error {
 	reorder := fs.Int("reorder", replay.DefaultReorderWindow,
 		"records held in the reorder buffer while sorting")
 	quiet := fs.Bool("quiet", false, "do not print the summary on stderr")
+	pretty := fs.Bool("pretty", false,
+		"write a readable, coloured event stream instead of canonical NDJSON")
 	var store storeFlags
 	store.register(fs, "replay from")
+	var term termFlags
+	term.register(fs)
 
 	fs.Usage = func() {
 		fmt.Fprint(fs.Output(),
@@ -39,7 +43,12 @@ func runReplay(args []string) error {
 				"  v1/symbol=BTC-USD/date=2026-08-25\n"+
 				"and objects are streamed as they are read rather than downloaded first.\n\n"+
 				"Replay stops at a gap or a reconnect unless -continue-on-gap is given; either\n"+
-				"way the gap and reseed records are part of the output.\n\nflags:\n")
+				"way the gap and reseed records are part of the output.\n\n"+
+				"-pretty writes a different stream: aligned, coloured rows meant to be read\n"+
+				"rather than parsed, with gaps and reseeds as full-width banners you cannot\n"+
+				"scroll past. It is a separate encoder, and the default output — the canonical\n"+
+				"NDJSON the determinism digest is taken over — is not touched by it or by any\n"+
+				"other flag here.\n\nflags:\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -61,6 +70,7 @@ func runReplay(args []string) error {
 	defer r.Close()
 
 	w := io.Writer(os.Stdout)
+	caps := term.caps(os.Stdout)
 	if *out != "" {
 		f, err := os.Create(*out)
 		if err != nil {
@@ -68,12 +78,21 @@ func runReplay(args []string) error {
 		}
 		defer f.Close()
 		w = f
+		// A file is not a terminal, whatever stdout happens to be.
+		caps = caps.Plain()
 	}
 	bw := bufio.NewWriterSize(w, 256<<10)
-	enc := replay.NewCanonicalEncoder(bw)
 
 	started := time.Now()
-	replayErr := drain(r, func(rec replay.Record) error { return enc.Encode(rec) })
+	var replayErr error
+	if *pretty {
+		replayErr = prettyReplay(bw, r, caps)
+	} else {
+		// The canonical path. Nothing configurable reaches it: the same window
+		// produces the same bytes it produced before this flag existed.
+		enc := replay.NewCanonicalEncoder(bw)
+		replayErr = drain(r, func(rec replay.Record) error { return enc.Encode(rec) })
+	}
 	elapsed := time.Since(started)
 
 	if err := bw.Flush(); err != nil {
