@@ -4,36 +4,35 @@
 
 ## What this is
 
-Exchanges broadcast every trade and every change to the order book the instant
-it happens — and then it's gone. Tape is a recorder for that stream. It writes
-the feed down as it arrives, stores it about five times smaller than the raw
-JSON, and plays it back later: identically, every time you press play.
+Every trade on an exchange, and every change to its order book, goes out over a
+public feed as it happens. Nobody keeps a copy for you. Tape records that feed,
+stores it about five times smaller than the raw JSON, and plays it back the same
+way every time.
 
 ## What it's for
 
-Say you have a trading idea — *buy when the price crosses above its 20-minute
-average*. Before risking money on it, you want to know how it would have done
-last Tuesday. That means you need last Tuesday's market data, trade by trade.
+Suppose you want to test a trading idea: buy when the price crosses above its
+20-minute average. To learn how it would have done last Tuesday, you need last
+Tuesday's market data, trade by trade.
 
-Two things go wrong. Exchanges give the live feed away for free and charge real
-money for history, so you end up recording it yourself. And a careless recorder
-drops its connection for ten seconds somewhere in the afternoon, leaving a file
-that looks perfectly healthy and is quietly missing a hundred trades. Your test
-says the idea made money. It didn't.
+Exchanges hand you the live feed for free and charge for the history, so you
+record it yourself. Then your recorder loses its connection for ten seconds one
+afternoon. The file it leaves behind looks fine and is missing a hundred trades.
+Your backtest reports a profit, and nothing in the file tells you otherwise.
 
-Tape handles both. It records the free public feed, writes every hole it finds
-*into the data* where you can't miss it, and guarantees that replaying the same
-window twice gives byte-for-byte the same answer. So when a backtest's result
-changes, you know your strategy changed — not the ground underneath it.
+Tape records the free public feed and writes every hole it finds into the data,
+where replay stops at it. Replay one window twice and you get the same bytes
+both times, so a backtest that changes its answer has told you something about
+your strategy and nothing about the ground under it.
 
-That last guarantee is the whole point of the project. If replaying one window
-twice can give two different answers, nothing built on top of it means anything,
-so "two replays are byte-identical" is a test in CI rather than an aspiration.
+The project is built around that property. If two replays of one window could
+disagree, every result above them would be worthless, so CI checks the digests
+on every push.
 
-Six other projects — futures backtesting, options pricing, earnings-surprise
-prediction, a Bollinger-bands strategy, a Polymarket paper-trader, and a limit
-order book simulator in C — all need historical market data, and each was
-improvising it. Tape is the layer underneath them.
+Six other projects need historical market data: futures backtesting, options
+pricing, earnings-surprise prediction, a Bollinger-bands strategy, a Polymarket
+paper-trader, and a limit order book simulator in C. Each was improvising its
+own. Tape is the layer underneath them.
 
 ## Quick start
 
